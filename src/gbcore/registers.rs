@@ -1,24 +1,24 @@
-const FLAG_C: u8 = 4;
-const FLAG_H: u8 = 5;
-const FLAG_N: u8 = 6;
-const FLAG_Z: u8 = 7;
+pub const FLAG_C: u8 = 4;
+pub const FLAG_H: u8 = 5;
+pub const FLAG_N: u8 = 6;
+pub const FLAG_Z: u8 = 7;
 
-struct Registers {
-    a:  u8,
-    f:  u8,
-    b:  u8,
-    c:  u8,
-    d:  u8,
-    e:  u8,
-    h:  u8,
-    l:  u8,
-    sp: u16,
-    pc: u16
+pub struct Registers {
+    pub a:  u8,
+    pub f:  u8,
+    pub b:  u8,
+    pub c:  u8,
+    pub d:  u8,
+    pub e:  u8,
+    pub h:  u8,
+    pub l:  u8,
+    pub sp: u16,
+    pub pc: u16
 }
 
 impl Registers {
     
-    fn new() -> Registers {
+    pub fn new() -> Registers {
         Registers {
             a:  0x01,
             f:  0xB0,
@@ -33,48 +33,68 @@ impl Registers {
         }
     }
 
-    fn af(&self) -> u16 {
+    pub fn af(&self) -> u16 {
         u16::from_be_bytes([self.a, self.f])
     }
 
-    fn set_af(&mut self, value: u16) -> () {
+    pub fn set_af(&mut self, value: u16) -> () {
         let masked = value & 0xFFF0;
         self.a = (masked >> 8) as u8;
         self.f = (masked & 0xFF) as u8;
     }
 
-    fn bc(&self) -> u16 {
+    pub fn bc(&self) -> u16 {
         u16::from_be_bytes([self.b, self.c])
     }
 
-    fn set_bc(&mut self, value: u16) -> () {
+    pub fn set_bc(&mut self, value: u16) -> () {
         self.b = (value >> 8) as u8;
         self.c = (value & 0xFF) as u8;
     }
 
-    fn de(&self) -> u16 {
+    pub fn de(&self) -> u16 {
         u16::from_be_bytes([self.d, self.e])
     }
 
-    fn set_de(&mut self, value: u16) -> () {
+    pub fn set_de(&mut self, value: u16) -> () {
         self.d = (value >> 8) as u8;
         self.e = (value & 0xFF) as u8;
     }
 
-    fn hl(&self) -> u16 {
+    pub fn hl(&self) -> u16 {
         u16::from_be_bytes([self.h, self.l])
     }
 
-    fn set_hl(&mut self, value: u16) -> () {
+    pub fn set_hl(&mut self, value: u16) -> () {
         self.h = (value >> 8) as u8;
         self.l = (value & 0xFF) as u8;
     }
 
-    fn flag(&self, f: u8) -> bool {
+    pub fn sp(&self) -> u16 {
+        self.sp
+    }
+
+    pub fn set_sp(&mut self, value: u16) -> () {
+        self.sp = value;
+    }
+
+    pub fn pc(&self) -> u16 {
+        self.pc
+    }
+
+    pub fn set_pc(&mut self, value: u16) -> () {
+        self.pc = value;
+    }
+
+    pub fn inc_pc(&mut self, value: u16) -> () {
+        self.pc = self.pc.wrapping_add(value);
+    }
+
+    pub fn flag(&self, f: u8) -> bool {
         self.f & (1 << f) != 0
     }
 
-    fn set_flag(&mut self, f: u8, value: bool) -> (){
+    pub fn set_flag(&mut self, f: u8, value: bool) -> (){
         if value{
             self.f = self.f | (1 << f);
         }
@@ -112,6 +132,10 @@ use super::*;
         assert_eq!(regs.bc(), 0x1234);
         regs.set_de(0xABCD);
         assert_eq!(regs.de(), 0xABCD);
+        regs.set_sp(0xF00F);
+        assert_eq!(regs.sp, 0xF00F);
+        regs.set_pc(0xF00F);
+        assert_eq!(regs.pc, 0xF00F);
     }
 
     #[test]

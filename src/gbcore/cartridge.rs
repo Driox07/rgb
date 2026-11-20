@@ -6,13 +6,13 @@ const MIN_LENGTH: u16 = 0x150;
 const TITLE_BEGIN:   u16 = 0x0134;
 const TITLE_END:     u16 = 0x0143;
 const TYPE_ADDR:     u16 = 0x0147;
-const RAM_TYPE_ADDR: u16 = 0x0149;
+const _RAM_TYPE_ADDR: u16 = 0x0149;
 const CHECKSUM_END:  u16 = 0x014C;
 const CHECKSUM_ADDR: u16 = 0x014D;
 
 #[derive(Debug)]
 pub struct Cartridge{
-    title: String,
+    pub title: String,
     rom: Vec<u8>
 }
 

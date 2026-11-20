@@ -1,4 +1,4 @@
-use rgb::bus::Bus;
+use rgb::gbcore::Bus;
 
 fn show_menu() {
     println!("What you wanna do?");
