@@ -1,4 +1,4 @@
-
+use rgb::bus::Bus;
 
 fn show_menu() {
     println!("What you wanna do?");
@@ -9,10 +9,20 @@ fn show_menu() {
 }
 
 fn main() {
-    println!("Welcome to Rust Game Boy!");
-    let mut exit = false;
-    while(!exit){
-        show_menu();
-        
-    }
+    let mut bus = Bus::new();
+    let rom = match std::fs::read("./gb-test-roms/halt_bug.gb"){
+        Ok(vector) => vector,
+        Err(error) => {
+            println!("{}", error);
+            return;
+        }
+    };
+    match bus.load_rom(rom) {
+        Ok(()) => (),
+        Err(error) => {
+            println!("{}", error);
+            return;
+        }
+    };
+    return;
 }
