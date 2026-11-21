@@ -29,6 +29,16 @@ impl CPU {
         fetched
     }
 
+    fn push(&mut self, value: u16) {
+        self.registers.set_sp(self.registers.sp().wrapping_sub(2));
+        self.bus.write16(self.registers.sp(), value);
+    }
+
+    fn pop(&mut self) -> u16 {
+        let val = self.bus.read16(self.registers.sp());
+        self.registers.set_sp(self.registers.sp().wrapping_add(2));
+        val
+    }
 
     fn get_r(&self, r: u8) -> u8 {
         match r {
@@ -58,11 +68,41 @@ impl CPU {
         }
     }
 
+    fn get_rr(&self, rr: u8, sp: bool) -> u16 {
+        match rr {
+            0 => self.registers.bc(),
+            1 => self.registers.de(),
+            2 => self.registers.hl(),
+            3 => if sp { self.registers.sp() } else { self.registers.af() },
+            _ => panic!("Invalid register 16 read: {:#04X}", rr)
+        }
+    }
+
+    fn set_rr(&mut self, rr: u8, value: u16, sp: bool) {
+        match rr {
+            0 => self.registers.set_bc(value),
+            1 => self.registers.set_de(value),
+            2 => self.registers.set_hl(value),
+            3 => if sp { self.registers.set_sp(value) } else { self.registers.set_af(value) },
+            _ => panic!("Invalid register 16 read: {:#04X}", rr)
+        }
+    }
+
     fn set_flags(&mut self, z: bool, n: bool, h: bool, c: bool) {
         self.registers.set_flag(registers::FLAG_Z, z);
         self.registers.set_flag(registers::FLAG_N, n);
         self.registers.set_flag(registers::FLAG_H, h);
         self.registers.set_flag(registers::FLAG_C, c);
+    }
+
+    fn check_condition(&self, cond: u8) -> bool {
+        match cond {
+            0 => !self.registers.flag(registers::FLAG_Z),
+            1 => self.registers.flag(registers::FLAG_Z),
+            2 => !self.registers.flag(registers::FLAG_C),
+            3 => self.registers.flag(registers::FLAG_C),
+            _    => panic!("Invalid condition value!")
+        }
     }
 
     fn alu(&mut self, op: u8, value: u8) {
@@ -110,17 +150,52 @@ impl CPU {
     }
 
     pub fn step(&mut self) -> u8 {
+        /*
+        OPCODE PARTS
+        ===============
+        7 6 5 4 3 2 1 0
+        --- ----- -----
+        x   y     z
+        ----- ---
+        w     cond
+        ------- -------
+        a       b
+        */
         let pc = self.registers.pc();
         let opcode = self.fetch8();
+
+
+        let _a = opcode >> 4;
+        let b = opcode & 0x0F;
+        let w = opcode >> 5;
+        let x = opcode >> 6;
         let y = opcode >> 3 & 7;
         let z = opcode & 7;
+        let cond = opcode >> 3 & 3;
+
         match opcode{
             // NOP
             0x00 => 4,
 
-            // 
             0x01..=0x3F => {
-                if z == 0b110 {
+                if x == 0 && b == 1{ // LD rr, u16
+                    let rr = opcode >> 4 & 0x03;
+                    let value = self.fetch16();
+                    self.set_rr(rr, value, true);
+                    12
+                }else if w == 1 && z == 0{ // JR cond, i8
+                    let value = self.fetch8() as i8;
+                    if self.check_condition(cond) {
+                        self.registers.inc_pc_signed(value as i16);
+                        12
+                    }else{
+                        8
+                    }
+                }else if opcode == 0x18 { // JR i8
+                    let value = self.fetch8() as i8;
+                    self.registers.inc_pc_signed(value as i16);
+                    12
+                }else if z == 0b110 { // LD r, u8
                     let data = self.fetch8();
                     self.set_r(y, data);
                     if y == 6 { 12 } else { 8 }
@@ -149,11 +224,58 @@ impl CPU {
 
 
             0xC0..=0xFF => {
-                if opcode == 0xC3 {
+                if opcode == 0xC3 { // JP
                     let addr = self.fetch16();
                     self.registers.set_pc(addr);
                     16
-                }else if z == 0b110 {
+                }else if opcode == 0xC9 { // RET
+                    let stored_pc = self.pop();
+                    self.registers.set_pc(stored_pc);
+                    16
+                }else if opcode == 0xCD { // CALL u16
+                    let addr = self.fetch16();
+                    self.push(self.registers.pc());
+                    self.registers.set_pc(addr);
+                    24
+                }else if opcode == 0xE9 { // JP (HL)
+                    self.registers.set_pc(self.registers.hl());
+                    4
+                }else if x == 3 && b == 5{ // PUSH
+                    let rr = opcode >> 4 & 0x03;
+                    let value = self.get_rr(rr, false);
+                    self.push(value);
+                    16
+                }else if x == 3 && b == 1{ // POP
+                    let rr = opcode >> 4 & 0x03;
+                    let stored = self.pop();
+                    self.set_rr(rr, stored, false);
+                    12
+                }else if w == 6 && z == 0{ // RET cond
+                    if self.check_condition(cond){
+                        let stored_pc = self.pop();
+                        self.registers.set_pc(stored_pc);
+                        20
+                    }else{
+                        8
+                    }
+                }else if w == 6 && z == 4{ // CALL cond, u16
+                    let addr = self.fetch16();
+                    if self.check_condition(cond) {
+                        self.push(self.registers.pc());
+                        self.registers.set_pc(addr);
+                        24
+                    }else{
+                        12
+                    }
+                }else if w == 6 && z == 2 { // JP cc, u16
+                    let addr = self.fetch16();
+                    if self.check_condition(cond) {
+                        self.registers.set_pc(addr);
+                        16
+                    }else{
+                        12
+                    }
+                }else if z == 0b110 { // ALU u8
                     let value = self.fetch8();
                     self.alu(y, value);
                     8
@@ -458,7 +580,7 @@ use super::*;
         assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
         assert_eq!(cpu.registers.pc, 0xC013);
 
-        // CP B -> 0x00 - 0x01 (A sigue en 0x00; Z=0, N=1, H=1, C=1)
+        // CP B -> 0x00 - 0x01 (A still in 0x00; Z=0, N=1, H=1, C=1)
         assert_eq!(cpu.step(), 4);
         assert_eq!(cpu.registers.a, 0x00);
         assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
@@ -573,6 +695,240 @@ use super::*;
         assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
         assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
         assert_eq!(cpu.registers.pc, 0xC01A);
+    }
+
+    #[test]
+    fn test_control_flow_and_stack() {
+        let bus = Bus::new();
+        let mut cpu = CPU::new(bus);
+        /*
+            0xC000: LD SP, 0xFFFE      (SP = 0xFFFE; PC = 0xC003)
+            0xC003: LD BC, 0x12FF      (BC = 0x12FF; PC = 0xC006)
+            0xC006: PUSH BC            (SP = 0xFFFC; (0xFFFD)=0x12, (0xFFFC)=0xFF; PC = 0xC007)
+            0xC007: POP AF             (A = 0x12, F = 0xF0; SP = 0xFFFE; PC = 0xC008)
+            0xC008: PUSH AF            (SP = 0xFFFC; (0xFFFD)=0x12, (0xFFFC)=0xF0; PC = 0xC009)
+            0xC009: POP DE             (DE = 0x12F0; SP = 0xFFFE; PC = 0xC00A)
+            0xC00A: LD HL, 0xC012      (HL = 0xC012; PC = 0xC00D)
+            0xC00D: JR +2              (PC = 0xC011)
+            0xC00F: LD A, 0x99         (skipped)
+            0xC011: JP (HL)            (PC = 0xC012)
+            0xC012: LD A, 0x05         (A = 0x05; PC = 0xC014)
+            0xC014: SUB 0x05           (A = 0x00; Z=1, N=1, H=0, C=0; PC = 0xC016)
+            0xC016: JR NZ, +2          (not taken; PC = 0xC018)
+            0xC018: JR Z, +2           (taken; PC = 0xC01C)
+            0xC01A: LD A, 0x99         (skipped)
+            0xC01C: JR C, +2           (not taken; PC = 0xC01E)
+            0xC01E: JR NC, +2          (taken; PC = 0xC022)
+            0xC020: LD A, 0x99         (skipped)
+            0xC022: JP NZ, 0xC050      (not taken; PC = 0xC025)
+            0xC025: JP Z, 0xC02A       (taken; PC = 0xC02A)
+            0xC028: LD A, 0x99         (skipped)
+            0xC02A: JP C, 0xC050       (not taken; PC = 0xC02D)
+            0xC02D: JP NC, 0xC032      (taken; PC = 0xC032)
+            0xC030: LD A, 0x99         (skipped)
+            0xC032: CALL NZ, 0xC050    (not taken; PC = 0xC035)
+            0xC035: CALL Z, 0xC047     (taken; SP = 0xFFFC; (0xFFFD)=0xC0, (0xFFFC)=0x38; PC = 0xC047)
+            0xC038: SUB 0x01           (A = 0xFF; Z=0, N=1, H=1, C=1; PC = 0xC03A)
+            0xC03A: CALL NC, 0xC050    (not taken; PC = 0xC03D)
+            0xC03D: CALL C, 0xC04B     (taken; SP = 0xFFFC; (0xFFFD)=0xC0, (0xFFFC)=0x40; PC = 0xC04B)
+            0xC040: CALL 0xC04F        (taken; SP = 0xFFFC; (0xFFFD)=0xC0, (0xFFFC)=0x43; PC = 0xC04F)
+            0xC043: JR -3              (PC = 0xC042)
+            0xC045: padding
+            0xC047: RET NZ             (not taken; PC = 0xC048)
+            0xC048: RET C              (not taken; PC = 0xC049)
+            0xC049: RET Z              (taken; SP = 0xFFFE; PC = 0xC038)
+            0xC04A: padding
+            0xC04B: RET Z              (not taken; PC = 0xC04C)
+            0xC04C: RET NC             (not taken; PC = 0xC04D)
+            0xC04D: RET C              (taken; SP = 0xFFFE; PC = 0xC040)
+            0xC04E: padding
+            0xC04F: RET                (taken; SP = 0xFFFE; PC = 0xC043)
+        */
+        load_program(&mut cpu, 0xC000, &[
+            0x31, 0xFE, 0xFF, // 0xC000: LD SP, 0xFFFE
+            0x01, 0xFF, 0x12, // 0xC003: LD BC, 0x12FF
+            0xC5,             // 0xC006: PUSH BC
+            0xF1,             // 0xC007: POP AF
+            0xF5,             // 0xC008: PUSH AF
+            0xD1,             // 0xC009: POP DE
+            0x21, 0x12, 0xC0, // 0xC00A: LD HL, 0xC012
+            0x18, 0x02,       // 0xC00D: JR +2 -> 0xC011
+            0x3E, 0x99,       // 0xC00F: LD A, 0x99
+            0xE9,             // 0xC011: JP (HL) -> 0xC012
+            0x3E, 0x05,       // 0xC012: LD A, 0x05
+            0xD6, 0x05,       // 0xC014: SUB 0x05 (Z=1, C=0)
+            0x20, 0x02,       // 0xC016: JR NZ, +2
+            0x28, 0x02,       // 0xC018: JR Z, +2 -> 0xC01C
+            0x3E, 0x99,       // 0xC01A: LD A, 0x99
+            0x38, 0x02,       // 0xC01C: JR C, +2
+            0x30, 0x02,       // 0xC01E: JR NC, +2 -> 0xC022
+            0x3E, 0x99,       // 0xC020: LD A, 0x99
+            0xC2, 0x50, 0xC0, // 0xC022: JP NZ, 0xC050
+            0xCA, 0x2A, 0xC0, // 0xC025: JP Z, 0xC02A
+            0x3E, 0x99,       // 0xC028: LD A, 0x99
+            0xDA, 0x50, 0xC0, // 0xC02A: JP C, 0xC050
+            0xD2, 0x32, 0xC0, // 0xC02D: JP NC, 0xC032
+            0x3E, 0x99,       // 0xC030: LD A, 0x99
+            0xC4, 0x50, 0xC0, // 0xC032: CALL NZ, 0xC050
+            0xCC, 0x47, 0xC0, // 0xC035: CALL Z, 0xC047
+            0xD6, 0x01,       // 0xC038: SUB 0x01 (Z=0, C=1)
+            0xD4, 0x50, 0xC0, // 0xC03A: CALL NC, 0xC050
+            0xDC, 0x4B, 0xC0, // 0xC03D: CALL C, 0xC04B
+            0xCD, 0x4F, 0xC0, // 0xC040: CALL 0xC04F
+            0x18, 0xFD,       // 0xC043: JR -3 -> 0xC042
+            0x00, 0x00,       // 0xC045..0xC046: padding
+            0xC0,             // 0xC047: RET NZ
+            0xD8,             // 0xC048: RET C
+            0xC8,             // 0xC049: RET Z
+            0x00,             // 0xC04A: padding
+            0xC8,             // 0xC04B: RET Z
+            0xD0,             // 0xC04C: RET NC
+            0xD8,             // 0xC04D: RET C
+            0x00,             // 0xC04E: padding
+            0xC9,             // 0xC04F: RET
+        ]);
+        cpu.registers.set_pc(0xC000);
+
+        // 16-bit immediate loads (LD rr, nn)
+        assert_eq!(cpu.step(), 12); // LD SP, 0xFFFE
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+        assert_eq!(cpu.registers.pc, 0xC003);
+
+        assert_eq!(cpu.step(), 12); // LD BC, 0x12FF
+        assert_eq!(cpu.registers.bc(), 0x12FF);
+        assert_eq!(cpu.registers.pc, 0xC006);
+
+        // Stack operations and AF lower nibble masking (F & 0xF0)
+        assert_eq!(cpu.step(), 16); // PUSH BC
+        assert_eq!(cpu.registers.sp(), 0xFFFC);
+        assert_eq!(cpu.bus.read(0xFFFD), 0x12);
+        assert_eq!(cpu.bus.read(0xFFFC), 0xFF);
+        assert_eq!(cpu.registers.pc, 0xC007);
+
+        assert_eq!(cpu.step(), 12); // POP AF -> AF = 0x12F0
+        assert_eq!(cpu.registers.a, 0x12);
+        assert_eq!(cpu.registers.f, 0xF0);
+        assert_eq!(cpu.registers.af(), 0x12F0);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+        assert_eq!(cpu.registers.pc, 0xC008);
+
+        assert_eq!(cpu.step(), 16); // PUSH AF
+        assert_eq!(cpu.bus.read(0xFFFD), 0x12);
+        assert_eq!(cpu.bus.read(0xFFFC), 0xF0);
+        assert_eq!(cpu.registers.pc, 0xC009);
+
+        assert_eq!(cpu.step(), 12); // POP DE -> DE = 0x12F0
+        assert_eq!(cpu.registers.de(), 0x12F0);
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+        assert_eq!(cpu.registers.pc, 0xC00A);
+
+        // Unconditional jumps (JR e, JP (HL))
+        assert_eq!(cpu.step(), 12); // LD HL, 0xC012
+        assert_eq!(cpu.registers.hl(), 0xC012);
+        assert_eq!(cpu.registers.pc, 0xC00D);
+
+        assert_eq!(cpu.step(), 12); // JR +2 -> 0xC011
+        assert_eq!(cpu.registers.pc, 0xC011);
+
+        assert_eq!(cpu.step(), 4);  // JP (HL) -> 0xC012
+        assert_eq!(cpu.registers.pc, 0xC012);
+
+        // Set flags: Z = 1, C = 0
+        assert_eq!(cpu.step(), 8);  // LD A, 0x05
+        assert_eq!(cpu.step(), 8);  // SUB 0x05 -> A = 0x00, Z = 1, C = 0
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC016);
+
+        // Conditional relative jumps (JR cc, e)
+        assert_eq!(cpu.step(), 8);  // JR NZ, +2 (not taken)
+        assert_eq!(cpu.registers.pc, 0xC018);
+
+        assert_eq!(cpu.step(), 12); // JR Z, +2 (taken) -> 0xC01C
+        assert_eq!(cpu.registers.pc, 0xC01C);
+
+        assert_eq!(cpu.step(), 8);  // JR C, +2 (not taken)
+        assert_eq!(cpu.registers.pc, 0xC01E);
+
+        assert_eq!(cpu.step(), 12); // JR NC, +2 (taken) -> 0xC022
+        assert_eq!(cpu.registers.pc, 0xC022);
+
+        // Conditional absolute jumps (JP cc, a16)
+        assert_eq!(cpu.step(), 12); // JP NZ, 0xC050 (not taken)
+        assert_eq!(cpu.registers.pc, 0xC025);
+
+        assert_eq!(cpu.step(), 16); // JP Z, 0xC02A (taken) -> 0xC02A
+        assert_eq!(cpu.registers.pc, 0xC02A);
+
+        assert_eq!(cpu.step(), 12); // JP C, 0xC050 (not taken)
+        assert_eq!(cpu.registers.pc, 0xC02D);
+
+        assert_eq!(cpu.step(), 16); // JP NC, 0xC032 (taken) -> 0xC032
+        assert_eq!(cpu.registers.pc, 0xC032);
+
+        // Conditional calls and returns with Z = 1, C = 0
+        assert_eq!(cpu.step(), 12); // CALL NZ, 0xC050 (not taken)
+        assert_eq!(cpu.registers.pc, 0xC035);
+
+        assert_eq!(cpu.step(), 24); // CALL Z, 0xC047 (taken) -> 0xC047
+        assert_eq!(cpu.registers.pc, 0xC047);
+        assert_eq!(cpu.registers.sp(), 0xFFFC);
+        assert_eq!(cpu.bus.read(0xFFFD), 0xC0);
+        assert_eq!(cpu.bus.read(0xFFFC), 0x38);
+
+        assert_eq!(cpu.step(), 8);  // RET NZ (not taken)
+        assert_eq!(cpu.registers.pc, 0xC048);
+
+        assert_eq!(cpu.step(), 8);  // RET C (not taken)
+        assert_eq!(cpu.registers.pc, 0xC049);
+
+        assert_eq!(cpu.step(), 20); // RET Z (taken) -> 0xC038
+        assert_eq!(cpu.registers.pc, 0xC038);
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+
+        // Set flags: Z = 0, C = 1
+        assert_eq!(cpu.step(), 8);  // SUB 0x01 -> A = 0xFF, Z = 0, C = 1
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC03A);
+
+        // Conditional calls and returns with Z = 0, C = 1
+        assert_eq!(cpu.step(), 12); // CALL NC, 0xC050 (not taken)
+        assert_eq!(cpu.registers.pc, 0xC03D);
+
+        assert_eq!(cpu.step(), 24); // CALL C, 0xC04B (taken) -> 0xC04B
+        assert_eq!(cpu.registers.pc, 0xC04B);
+        assert_eq!(cpu.registers.sp(), 0xFFFC);
+        assert_eq!(cpu.bus.read(0xFFFD), 0xC0);
+        assert_eq!(cpu.bus.read(0xFFFC), 0x40);
+
+        assert_eq!(cpu.step(), 8);  // RET Z (not taken)
+        assert_eq!(cpu.registers.pc, 0xC04C);
+
+        assert_eq!(cpu.step(), 8);  // RET NC (not taken)
+        assert_eq!(cpu.registers.pc, 0xC04D);
+
+        assert_eq!(cpu.step(), 20); // RET C (taken) -> 0xC040
+        assert_eq!(cpu.registers.pc, 0xC040);
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+
+        // Unconditional CALL, RET and negative relative jump
+        assert_eq!(cpu.step(), 24); // CALL 0xC04F (taken) -> 0xC04F
+        assert_eq!(cpu.registers.pc, 0xC04F);
+        assert_eq!(cpu.registers.sp(), 0xFFFC);
+        assert_eq!(cpu.bus.read(0xFFFD), 0xC0);
+        assert_eq!(cpu.bus.read(0xFFFC), 0x43);
+
+        assert_eq!(cpu.step(), 16); // RET (taken) -> 0xC043
+        assert_eq!(cpu.registers.pc, 0xC043);
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+
+        assert_eq!(cpu.step(), 12); // JR -3 -> 0xC042
+        assert_eq!(cpu.registers.pc, 0xC042);
     }
 
 }

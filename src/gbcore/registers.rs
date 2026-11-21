@@ -90,6 +90,10 @@ impl Registers {
         self.pc = self.pc.wrapping_add(value);
     }
 
+    pub fn inc_pc_signed(&mut self, value: i16) {
+        self.pc = self.pc.wrapping_add_signed(value);
+    }
+
     pub fn flag(&self, f: u8) -> bool {
         self.f & (1 << f) != 0
     }
