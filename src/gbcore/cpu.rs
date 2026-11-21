@@ -88,6 +88,40 @@ impl CPU {
         }
     }
 
+    fn get_mem_at_rr(&mut self, rr: u8) -> u8 {
+        match rr {
+            0 => self.bus.read(self.registers.bc()),
+            1 => self.bus.read(self.registers.de()),
+            2 => { 
+                let val = self.bus.read(self.registers.hl());
+                self.registers.set_hl(self.registers.hl().wrapping_add(1));
+                val
+            },
+            3 => {
+                let val = self.bus.read(self.registers.hl());
+                self.registers.set_hl(self.registers.hl().wrapping_sub(1));
+                val
+            },
+            _ => panic!("Invalid register 16 memory read: {:#04X}", rr)
+        }
+    }
+
+    fn set_mem_at_rr(&mut self, rr: u8, value: u8) {
+        match rr {
+            0 => self.bus.write(self.registers.bc(), value),
+            1 => self.bus.write(self.registers.de(), value),
+            2 => { 
+                self.bus.write(self.registers.hl(), value);
+                self.registers.set_hl(self.registers.hl().wrapping_add(1));
+            },
+            3 => {
+                self.bus.write(self.registers.hl(), value);
+                self.registers.set_hl(self.registers.hl().wrapping_sub(1));
+            },
+            _ => panic!("Invalid register 16 memory read: {:#04X}", rr)
+        }
+    }
+
     fn set_flags(&mut self, z: bool, n: bool, h: bool, c: bool) {
         self.registers.set_flag(registers::FLAG_Z, z);
         self.registers.set_flag(registers::FLAG_N, n);
@@ -105,45 +139,46 @@ impl CPU {
         }
     }
 
-    fn alu(&mut self, op: u8, value: u8) {
+    fn alu(&mut self, op: u8, a: u8, b: u8) -> u8 {
         match op {
             0 => { // ADD
-                let (res, c) = self.registers.a.overflowing_add(value);
-                self.set_flags(res == 0, false, ((self.registers.a&0x0F) + (value&0x0F)) > 0x0F, c);
-                self.registers.a = res;
+                let (res, c) = a.overflowing_add(b);
+                self.set_flags(res == 0, false, ((a&0x0F) + (b&0x0F)) > 0x0F, c);
+                res
             },
             1 => { // ADC
                 let carrying = if self.registers.flag(registers::FLAG_C) {1} else {0};
-                let (preres, c1) = value.overflowing_add(carrying);
-                let (res, c2) = self.registers.a.overflowing_add(preres);
-                self.set_flags(res == 0, false, (self.registers.a&0x0F) + (value&0x0F) + carrying > 0x0F, c1 || c2);
-                self.registers.a = res;
+                let (preres, c1) = b.overflowing_add(carrying);
+                let (res, c2) = a.overflowing_add(preres);
+                self.set_flags(res == 0, false, (a&0x0F) + (b&0x0F) + carrying > 0x0F, c1 || c2);
+                res
             },
             2 => { // SUB
-                let (res, c) = self.registers.a.overflowing_sub(value);
-                self.set_flags(res == 0, true, (self.registers.a&0x0F) < (value&0x0F), c);
-                self.registers.a = res;
+                let (res, c) = a.overflowing_sub(b);
+                self.set_flags(res == 0, true, (a&0x0F) < (b&0x0F), c);
+                res
             },
             3 => { // SBC
                 let carrying = if self.registers.flag(registers::FLAG_C) {1} else {0};
-                let (preres, c1) = value.overflowing_add(carrying);
-                let (res, c2) = self.registers.a.overflowing_sub(preres);
-                self.set_flags(res == 0, true, (self.registers.a&0x0F) < (value&0x0F) + carrying, c1 || c2);
-                self.registers.a = res;
+                let (preres, c1) = b.overflowing_add(carrying);
+                let (res, c2) = a.overflowing_sub(preres);
+                self.set_flags(res == 0, true, (a&0x0F) < (b&0x0F) + carrying, c1 || c2);
+                res
             },
             4 => { // AND
-                let res = self.registers.a & value;
+                let res = a & b;
                 self.set_flags(res == 0, false, true, false);
-                self.registers.a = res;
+                res
             },
             5..=6 => { // XOR & OR
-                let res = if op == 5 { self.registers.a ^ value } else { self.registers.a | value };
+                let res = if op == 5 { a ^ b } else { a | b };
                 self.set_flags(res == 0, false, false, false);
-                self.registers.a = res;
+                res
             }, 
             7 => { // CP
-                let (res, c) = self.registers.a.overflowing_sub(value);
-                self.set_flags(res == 0, true, (self.registers.a&0x0F) < (value&0x0F), c);
+                let (res, c) = a.overflowing_sub(b);
+                self.set_flags(res == 0, true, (self.registers.a&0x0F) < (b&0x0F), c);
+                a
             },
             _ => panic!("Invalid ALU operation received: {:#04X}", op)
         }
@@ -156,61 +191,126 @@ impl CPU {
         7 6 5 4 3 2 1 0
         --- ----- -----
         x   y     z
-        ----- ---
-        w     cond
-        ------- -------
-        a       b
         */
         let pc = self.registers.pc();
         let opcode = self.fetch8();
 
-
-        let _a = opcode >> 4;
-        let b = opcode & 0x0F;
-        let w = opcode >> 5;
-        let x = opcode >> 6;
         let y = opcode >> 3 & 7;
         let z = opcode & 7;
         let cond = opcode >> 3 & 3;
 
         match opcode{
-            // NOP
-            0x00 => 4,
+            ..=0x3F => {
+                match z {
+                    0 => {
+                        match y {
+                            // NOP
+                            0 => 4,
 
-            0x01..=0x3F => {
-                if x == 0 && b == 1{ // LD rr, u16
-                    let rr = opcode >> 4 & 0x03;
-                    let value = self.fetch16();
-                    self.set_rr(rr, value, true);
-                    12
-                }else if w == 1 && z == 0{ // JR cond, i8
-                    let value = self.fetch8() as i8;
-                    if self.check_condition(cond) {
-                        self.registers.inc_pc_signed(value as i16);
+                            // LD (addr), SP
+                            1 => {
+                                let addr = self.fetch16();
+                                self.bus.write16(addr, self.registers.sp());
+                                20
+                            },
+
+                            // STOP
+                            // 2 => 
+
+                            // JR i8
+                            3 => {
+                                let value = self.fetch8() as i8;
+                                self.registers.inc_pc_signed(value as i16);
+                                12
+                            },
+                            
+                            // JR cond, i8
+                            4..=7 => { 
+                                let value = self.fetch8() as i8;
+                                if self.check_condition(cond) {
+                                    self.registers.inc_pc_signed(value as i16);
+                                    12
+                                }else{
+                                    8
+                                }
+                            },
+
+                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                        }
+                    },
+
+                    // LD rr, u16
+                    1 => {
+                        let rr = y >> 1 & 3;
+                        let value = self.fetch16();
+                        self.set_rr(rr, value, true);
                         12
-                    }else{
+                    },
+
+                    // LD (rr), A y LD A, (rr)
+                    2 => {
+                        // If y lsb == 0 -> ret to mem, else, mem to reg
+                        let rr = y >> 1 & 3;
+                        let ylsb = y & 1;
+                        if ylsb == 0 {
+                            self.set_mem_at_rr(rr, self.registers.a);
+                        } else {
+                            let value = self.get_mem_at_rr(rr);
+                            self.registers.a = value;
+                        }
                         8
+                    },
+
+                    // INC - DEC rr
+                    3 => {
+                        let rr = y >> 1 & 3;
+                        let ylsb = y & 1;
+                        if ylsb == 0 {
+                            self.set_rr(rr, self.get_rr(rr,true).wrapping_add(1), true);
+                        }else{
+                            self.set_rr(rr, self.get_rr(rr, true).wrapping_sub(1), true);
+                        }
+                        8
+                    },
+
+                    // INC r
+                    4 => {
+                        let curr_c = self.registers.flag(registers::FLAG_C);
+                        let res = self.alu(0, self.get_r(y), 1);
+                        self.registers.set_flag(registers::FLAG_C, curr_c);
+                        self.set_r(y, res);
+                        if y == 6 { 12 } else { 4 }
+                    },
+
+                    // DEC r
+                    5 => {
+                        let curr_c = self.registers.flag(registers::FLAG_C);
+                        let res = self.alu(2, self.get_r(y), 1);
+                        self.registers.set_flag(registers::FLAG_C, curr_c);
+                        self.set_r(y, res);
+                        if y == 6 { 12 } else { 4 }
+                    },
+
+                    // LD r, u8
+                    6 => {
+                        let val = self.fetch8();
+                        self.set_r(y, val);
+                        if y == 6 { 12 } else { 8 }
                     }
-                }else if opcode == 0x18 { // JR i8
-                    let value = self.fetch8() as i8;
-                    self.registers.inc_pc_signed(value as i16);
-                    12
-                }else if z == 0b110 { // LD r, u8
-                    let data = self.fetch8();
-                    self.set_r(y, data);
-                    if y == 6 { 12 } else { 8 }
-                }else{
-                    panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
-                }
+
+                    _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+
+                }   
             },
 
-            // 8 bit transfer
             0x40..=0x7F => {
-                // Any LD r, r' (including HL)
+                
+                // HALT
                 if opcode == 0x76{
                     panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
                 }
 
+                // Any LD r, r'
                 self.set_r(y, self.get_r(z));
                 // If HL have been read or written it takes 8 cycles, else, 4 
                 if y == 6 || z == 6 { 8 } else { 4 }
@@ -218,69 +318,200 @@ impl CPU {
 
             // 8b ALU Operations
             0x80..=0xBF => {
-                self.alu(y, self.get_r(z));
+                let res = self.alu(y, self.registers.a, self.get_r(z));
+                self.registers.a = res;
                 if z == 6 { 8 } else { 4 }
             },
 
 
             0xC0..=0xFF => {
-                if opcode == 0xC3 { // JP
-                    let addr = self.fetch16();
-                    self.registers.set_pc(addr);
-                    16
-                }else if opcode == 0xC9 { // RET
-                    let stored_pc = self.pop();
-                    self.registers.set_pc(stored_pc);
-                    16
-                }else if opcode == 0xCD { // CALL u16
-                    let addr = self.fetch16();
-                    self.push(self.registers.pc());
-                    self.registers.set_pc(addr);
-                    24
-                }else if opcode == 0xE9 { // JP (HL)
-                    self.registers.set_pc(self.registers.hl());
-                    4
-                }else if x == 3 && b == 5{ // PUSH
-                    let rr = opcode >> 4 & 0x03;
-                    let value = self.get_rr(rr, false);
-                    self.push(value);
-                    16
-                }else if x == 3 && b == 1{ // POP
-                    let rr = opcode >> 4 & 0x03;
-                    let stored = self.pop();
-                    self.set_rr(rr, stored, false);
-                    12
-                }else if w == 6 && z == 0{ // RET cond
-                    if self.check_condition(cond){
-                        let stored_pc = self.pop();
-                        self.registers.set_pc(stored_pc);
-                        20
-                    }else{
+                match z {
+                    // LD HL
+                    0 => {
+
+                        match y {
+                            
+                            // RET cc
+                            0..=3 => {
+                                if self.check_condition(cond){
+                                    let stored_pc = self.pop();
+                                    self.registers.set_pc(stored_pc);
+                                    20
+                                }else{
+                                    8
+                                }
+                            },
+
+                            // ADD SP, i8
+                            // 5 => {
+
+                            // },
+
+                            // LDH
+                            4 | 6 => {
+                                let offset = self.fetch8();
+                                let addr = 0xFF00 + offset as u16;
+                                if y == 4{ // Reg to mem
+                                    self.bus.write(addr, self.registers.a);
+                                }else{ // Mem to reg
+                                    self.registers.a = self.bus.read(addr);
+                                }
+                                12
+                            },
+
+                            // LD HL, SP + i8
+                            // 7 => {
+
+                            // },
+
+                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+
+                        }
+
+                    },
+
+                    1 => {
+                        match y {
+
+                            // RET
+                            1 => {
+                                let stored_pc = self.pop();
+                                self.registers.set_pc(stored_pc);
+                                16
+                            },
+
+                            // RETI
+                            // 3 => {
+
+                            // },
+
+                            // POP
+                            0 | 2 | 4 | 6 => {
+                                let rr = y >> 1 & 3;
+                                let stored = self.pop();
+                                self.set_rr(rr, stored, false);
+                                12
+                            },
+
+                            // JP HL
+                            5 => {
+                                self.registers.set_pc(self.registers.hl());
+                                4
+                            },
+
+                            // LD SP, HL
+                            // 7 => {
+
+                            // },
+
+                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                        }
+                    },
+
+                    2 => {
+                        match y {
+                            // JP CC
+                            0..=3 => {
+                                let addr = self.fetch16();
+                                if self.check_condition(cond) {
+                                    self.registers.set_pc(addr);
+                                    16
+                                }else{
+                                    12
+                                }
+                            },
+
+                            // LD (C), A / LD A, (C)
+                            4 | 6 => {
+                                if y == 4 { // Reg to mem
+                                    self.bus.write(0xFF00 + self.registers.c as u16, self.registers.a);
+                                }else{ // Mem to reg
+                                    self.registers.a = self.bus.read(0xFF00 + self.registers.c as u16);
+                                }
+                                8
+                            },
+
+                            // LD (u16), A / LD A, (u16)
+                            5 | 7 => {
+                                let addr = self.fetch16();
+                                if y == 5 { // reg to mem
+                                    self.bus.write(addr, self.registers.a);
+                                }else{ // mem to reg
+                                    self.registers.a = self.bus.read(addr);
+                                }
+                                16
+                            },
+
+                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                        } 
+                    },
+                    
+                    3 => {
+                        match y {
+                            // JP U16
+                            0 => {
+                                let addr = self.fetch16();
+                                self.registers.set_pc(addr);
+                                16
+                            },
+
+                            // Prefix CB
+                            // 1 => {},
+
+                            // DI
+                            // 6 => {},
+
+                            // EI
+                            // 7 => {},
+
+                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                        }
+                    },
+
+                    // CALL CC, 
+                    4 => {
+                        let addr = self.fetch16();
+                        if self.check_condition(cond) {
+                            self.push(self.registers.pc());
+                            self.registers.set_pc(addr);
+                            24
+                        }else{
+                            12
+                        }
+                    },
+
+                    5 => {
+                        match y {
+                            // CALL u16
+                            1 => {
+                                let addr = self.fetch16();
+                                self.push(self.registers.pc());
+                                self.registers.set_pc(addr);
+                                24
+                            },
+                            // Push rr
+                            0 | 2 | 4 | 6 => {
+                                let rr = y >> 1 & 3;
+                                let value = self.get_rr(rr, false);
+                                self.push(value);
+                                16
+                            },
+                            _ => panic!("Illegal opcode: {:#04X} at PC = {:#06X}", opcode, pc)
+                        }
+                    },
+
+                    // ALU A, u8
+                    6 => {
+                        let value = self.fetch8();
+                        let res = self.alu(y, self.registers.a, value);
+                        self.registers.a = res;
                         8
-                    }
-                }else if w == 6 && z == 4{ // CALL cond, u16
-                    let addr = self.fetch16();
-                    if self.check_condition(cond) {
-                        self.push(self.registers.pc());
-                        self.registers.set_pc(addr);
-                        24
-                    }else{
-                        12
-                    }
-                }else if w == 6 && z == 2 { // JP cc, u16
-                    let addr = self.fetch16();
-                    if self.check_condition(cond) {
-                        self.registers.set_pc(addr);
-                        16
-                    }else{
-                        12
-                    }
-                }else if z == 0b110 { // ALU u8
-                    let value = self.fetch8();
-                    self.alu(y, value);
-                    8
-                }else{
-                    panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                    },
+
+                    // RST
+                    // 7 => {},
+
+                    _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
                 }
             }
         }
@@ -929,6 +1160,272 @@ use super::*;
 
         assert_eq!(cpu.step(), 12); // JR -3 -> 0xC042
         assert_eq!(cpu.registers.pc, 0xC042);
+    }
+
+    #[test]
+    fn test_loads_and_inc_dec_8_16() {
+        let bus = Bus::new();
+        let mut cpu = CPU::new(bus);
+        /*
+            0xC000: LD BC, 0xC100      (BC = 0xC100; PC = 0xC003)
+            0xC003: LD DE, 0xC103      (DE = 0xC103; PC = 0xC006)
+            0xC006: LD HL, 0xC104      (HL = 0xC104; PC = 0xC009)
+            0xC009: LD SP, 0xFFFF      (SP = 0xFFFF; PC = 0xC00C)
+
+            // 16-bit INC/DEC (no flags modified)
+            0xC00C: INC BC             (BC = 0xC101; PC = 0xC00D)
+            0xC00D: DEC DE             (DE = 0xC102; PC = 0xC00E)
+            0xC00E: INC SP             (SP = 0x0000; PC = 0xC00F)
+            0xC00F: DEC SP             (SP = 0xFFFF; PC = 0xC010)
+            0xC010: LD (0xC110), SP    ((0xC110) = 0xFF, (0xC111) = 0xFF; PC = 0xC013)
+
+            // Indirect memory loads via (BC), (DE), (HL+), (HL-)
+            0xC013: LD A, 0x42         (A = 0x42; PC = 0xC015)
+            0xC015: LD (BC), A         ((0xC101) = 0x42; PC = 0xC016)
+            0xC016: LD A, 0x77         (A = 0x77; PC = 0xC018)
+            0xC018: LD (DE), A         ((0xC102) = 0x77; PC = 0xC019)
+            0xC019: LD A, (BC)         (A = 0x42; PC = 0xC01A)
+            0xC01A: LD (HL+), A        ((0xC104) = 0x42; HL = 0xC105; PC = 0xC01B)
+            0xC01B: LD A, (DE)         (A = 0x77; PC = 0xC01C)
+            0xC01C: LD (HL-), A        ((0xC105) = 0x77; HL = 0xC104; PC = 0xC01D)
+            0xC01D: LD A, (HL+)        (A = 0x42; HL = 0xC105; PC = 0xC01E)
+            0xC01E: LD A, (HL-)        (A = 0x77; HL = 0xC104; PC = 0xC01F)
+
+            // Direct & high-RAM loads: (a16), (a8), (C)
+            0xC01F: LD (0xC120), A     ((0xC120) = 0x77; PC = 0xC022)
+            0xC022: LD A, 0x00         (A = 0x00; PC = 0xC024)
+            0xC024: LD A, (0xC120)     (A = 0x77; PC = 0xC027)
+            0xC027: LDH (0x80), A      ((0xFF80) = 0x77; PC = 0xC029)
+            0xC029: LD A, 0x00         (A = 0x00; PC = 0xC02B)
+            0xC02B: LDH A, (0x80)      (A = 0x77; PC = 0xC02D)
+            0xC02D: LD C, 0x85         (C = 0x85; PC = 0xC02F)
+            0xC02F: LD (C), A          ((0xFF85) = 0x77; PC = 0xC030)
+            0xC030: LD A, 0x00         (A = 0x00; PC = 0xC032)
+            0xC032: LD A, (C)          (A = 0x77; PC = 0xC033)
+
+            // 8-bit immediate loads & INC/DEC (register & (HL), C flag preserved)
+            0xC033: LD B, 0x0F         (B = 0x0F; PC = 0xC035)
+            0xC035: INC B              (B = 0x10; Z=0, N=0, H=1, C=1; PC = 0xC036)
+            0xC036: DEC B              (B = 0x0F; Z=0, N=1, H=1, C=1; PC = 0xC037)
+            0xC037: LD C, 0xFF         (C = 0xFF; PC = 0xC039)
+            0xC039: INC C              (C = 0x00; Z=1, N=0, H=1, C=1; PC = 0xC03A)
+            0xC03A: DEC C              (C = 0xFF; Z=0, N=1, H=1, C=1; PC = 0xC03B)
+            0xC03B: LD (HL), 0x00      ((0xC104) = 0x00; PC = 0xC03D)
+            0xC03D: DEC (HL)           ((0xC104) = 0xFF; Z=0, N=1, H=1, C=1; PC = 0xC03E)
+            0xC03E: INC (HL)           ((0xC104) = 0x00; Z=1, N=0, H=1, C=1; PC = 0xC03F)
+        */
+        load_program(&mut cpu, 0xC000, &[
+            0x01, 0x00, 0xC1, // 0xC000: LD BC, 0xC100
+            0x11, 0x03, 0xC1, // 0xC003: LD DE, 0xC103
+            0x21, 0x04, 0xC1, // 0xC006: LD HL, 0xC104
+            0x31, 0xFF, 0xFF, // 0xC009: LD SP, 0xFFFF
+            0x03,             // 0xC00C: INC BC
+            0x1B,             // 0xC00D: DEC DE
+            0x33,             // 0xC00E: INC SP
+            0x3B,             // 0xC00F: DEC SP
+            0x08, 0x10, 0xC1, // 0xC010: LD (0xC110), SP
+            0x3E, 0x42,       // 0xC013: LD A, 0x42
+            0x02,             // 0xC015: LD (BC), A
+            0x3E, 0x77,       // 0xC016: LD A, 0x77
+            0x12,             // 0xC018: LD (DE), A
+            0x0A,             // 0xC019: LD A, (BC)
+            0x22,             // 0xC01A: LD (HL+), A
+            0x1A,             // 0xC01B: LD A, (DE)
+            0x32,             // 0xC01C: LD (HL-), A
+            0x2A,             // 0xC01D: LD A, (HL+)
+            0x3A,             // 0xC01E: LD A, (HL-)
+            0xEA, 0x20, 0xC1, // 0xC01F: LD (0xC120), A
+            0x3E, 0x00,       // 0xC022: LD A, 0x00
+            0xFA, 0x20, 0xC1, // 0xC024: LD A, (0xC120)
+            0xE0, 0x80,       // 0xC027: LDH (0x80), A
+            0x3E, 0x00,       // 0xC029: LD A, 0x00
+            0xF0, 0x80,       // 0xC02B: LDH A, (0x80)
+            0x0E, 0x85,       // 0xC02D: LD C, 0x85
+            0xE2,             // 0xC02F: LD (C), A
+            0x3E, 0x00,       // 0xC030: LD A, 0x00
+            0xF2,             // 0xC032: LD A, (C)
+            0x06, 0x0F,       // 0xC033: LD B, 0x0F
+            0x04,             // 0xC035: INC B
+            0x05,             // 0xC036: DEC B
+            0x0E, 0xFF,       // 0xC037: LD C, 0xFF
+            0x0C,             // 0xC039: INC C
+            0x0D,             // 0xC03A: DEC C
+            0x36, 0x00,       // 0xC03B: LD (HL), 0x00
+            0x35,             // 0xC03D: DEC (HL)
+            0x34,             // 0xC03E: INC (HL)
+        ]);
+        cpu.registers.set_pc(0xC000);
+        cpu.registers.set_flag(registers::FLAG_Z, false);
+        cpu.registers.set_flag(registers::FLAG_N, false);
+        cpu.registers.set_flag(registers::FLAG_H, false);
+        cpu.registers.set_flag(registers::FLAG_C, true);
+
+        // 16-bit immediate loads (LD rr, nn)
+        assert_eq!(cpu.step(), 12); // LD BC, 0xC100
+        assert_eq!(cpu.registers.bc(), 0xC100);
+        assert_eq!(cpu.registers.pc, 0xC003);
+
+        assert_eq!(cpu.step(), 12); // LD DE, 0xC103
+        assert_eq!(cpu.registers.de(), 0xC103);
+        assert_eq!(cpu.registers.pc, 0xC006);
+
+        assert_eq!(cpu.step(), 12); // LD HL, 0xC104
+        assert_eq!(cpu.registers.hl(), 0xC104);
+        assert_eq!(cpu.registers.pc, 0xC009);
+
+        assert_eq!(cpu.step(), 12); // LD SP, 0xFFFF
+        assert_eq!(cpu.registers.sp(), 0xFFFF);
+        assert_eq!(cpu.registers.pc, 0xC00C);
+
+        // 16-bit INC/DEC & SP store (no flags modified)
+        assert_eq!(cpu.step(), 8);  // INC BC -> 0xC101
+        assert_eq!(cpu.registers.bc(), 0xC101);
+        assert_eq!(cpu.registers.pc, 0xC00D);
+
+        assert_eq!(cpu.step(), 8);  // DEC DE -> 0xC102
+        assert_eq!(cpu.registers.de(), 0xC102);
+        assert_eq!(cpu.registers.pc, 0xC00E);
+
+        assert_eq!(cpu.step(), 8);  // INC SP -> 0x0000
+        assert_eq!(cpu.registers.sp(), 0x0000);
+        assert_eq!(cpu.registers.pc, 0xC00F);
+
+        assert_eq!(cpu.step(), 8);  // DEC SP -> 0xFFFF
+        assert_eq!(cpu.registers.sp(), 0xFFFF);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC010);
+
+        assert_eq!(cpu.step(), 20); // LD (0xC110), SP -> (0xC110)=0xFF, (0xC111)=0xFF
+        assert_eq!(cpu.bus.read(0xC110), 0xFF);
+        assert_eq!(cpu.bus.read(0xC111), 0xFF);
+        assert_eq!(cpu.registers.pc, 0xC013);
+
+        // Indirect memory loads via (BC), (DE), (HL+), (HL-)
+        assert_eq!(cpu.step(), 8);  // LD A, 0x42
+        assert_eq!(cpu.step(), 8);  // LD (BC), A -> (0xC101) = 0x42
+        assert_eq!(cpu.bus.read(0xC101), 0x42);
+        assert_eq!(cpu.registers.pc, 0xC016);
+
+        assert_eq!(cpu.step(), 8);  // LD A, 0x77
+        assert_eq!(cpu.step(), 8);  // LD (DE), A -> (0xC102) = 0x77
+        assert_eq!(cpu.bus.read(0xC102), 0x77);
+        assert_eq!(cpu.registers.pc, 0xC019);
+
+        assert_eq!(cpu.step(), 8);  // LD A, (BC) -> A = 0x42
+        assert_eq!(cpu.registers.a, 0x42);
+        assert_eq!(cpu.registers.pc, 0xC01A);
+
+        assert_eq!(cpu.step(), 8);  // LD (HL+), A -> (0xC104) = 0x42, HL = 0xC105
+        assert_eq!(cpu.bus.read(0xC104), 0x42);
+        assert_eq!(cpu.registers.hl(), 0xC105);
+        assert_eq!(cpu.registers.pc, 0xC01B);
+
+        assert_eq!(cpu.step(), 8);  // LD A, (DE) -> A = 0x77
+        assert_eq!(cpu.registers.a, 0x77);
+        assert_eq!(cpu.registers.pc, 0xC01C);
+
+        assert_eq!(cpu.step(), 8);  // LD (HL-), A -> (0xC105) = 0x77, HL = 0xC104
+        assert_eq!(cpu.bus.read(0xC105), 0x77);
+        assert_eq!(cpu.registers.hl(), 0xC104);
+        assert_eq!(cpu.registers.pc, 0xC01D);
+
+        assert_eq!(cpu.step(), 8);  // LD A, (HL+) -> A = 0x42, HL = 0xC105
+        assert_eq!(cpu.registers.a, 0x42);
+        assert_eq!(cpu.registers.hl(), 0xC105);
+        assert_eq!(cpu.registers.pc, 0xC01E);
+
+        assert_eq!(cpu.step(), 8);  // LD A, (HL-) -> A = 0x77, HL = 0xC104
+        assert_eq!(cpu.registers.a, 0x77);
+        assert_eq!(cpu.registers.hl(), 0xC104);
+        assert_eq!(cpu.registers.pc, 0xC01F);
+
+        // Direct 16-bit & High-RAM loads: (a16), (a8), (C)
+        assert_eq!(cpu.step(), 16); // LD (0xC120), A -> (0xC120) = 0x77
+        assert_eq!(cpu.bus.read(0xC120), 0x77);
+        assert_eq!(cpu.registers.pc, 0xC022);
+
+        assert_eq!(cpu.step(), 8);  // LD A, 0x00
+        assert_eq!(cpu.step(), 16); // LD A, (0xC120) -> A = 0x77
+        assert_eq!(cpu.registers.a, 0x77);
+        assert_eq!(cpu.registers.pc, 0xC027);
+
+        assert_eq!(cpu.step(), 12); // LDH (0x80), A -> (0xFF80) = 0x77
+        assert_eq!(cpu.bus.read(0xFF80), 0x77);
+        assert_eq!(cpu.registers.pc, 0xC029);
+
+        assert_eq!(cpu.step(), 8);  // LD A, 0x00
+        assert_eq!(cpu.step(), 12); // LDH A, (0x80) -> A = 0x77
+        assert_eq!(cpu.registers.a, 0x77);
+        assert_eq!(cpu.registers.pc, 0xC02D);
+
+        assert_eq!(cpu.step(), 8);  // LD C, 0x85
+        assert_eq!(cpu.step(), 8);  // LD (C), A -> (0xFF85) = 0x77
+        assert_eq!(cpu.bus.read(0xFF85), 0x77);
+        assert_eq!(cpu.registers.pc, 0xC030);
+
+        assert_eq!(cpu.step(), 8);  // LD A, 0x00
+        assert_eq!(cpu.step(), 8);  // LD A, (C) -> A = 0x77
+        assert_eq!(cpu.registers.a, 0x77);
+        assert_eq!(cpu.registers.pc, 0xC033);
+
+        // 8-bit immediate loads & INC/DEC on registers (C flag must remain true)
+        assert_eq!(cpu.step(), 8);  // LD B, 0x0F
+        assert_eq!(cpu.step(), 4);  // INC B -> 0x10 (Z=0, N=0, H=1, C=1)
+        assert_eq!(cpu.registers.b, 0x10);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC036);
+
+        assert_eq!(cpu.step(), 4);  // DEC B -> 0x0F (Z=0, N=1, H=1, C=1)
+        assert_eq!(cpu.registers.b, 0x0F);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC037);
+
+        assert_eq!(cpu.step(), 8);  // LD C, 0xFF
+        assert_eq!(cpu.step(), 4);  // INC C -> 0x00 (Z=1, N=0, H=1, C=1)
+        assert_eq!(cpu.registers.c, 0x00);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC03A);
+
+        assert_eq!(cpu.step(), 4);  // DEC C -> 0xFF (Z=0, N=1, H=1, C=1)
+        assert_eq!(cpu.registers.c, 0xFF);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC03B);
+
+        // 8-bit immediate load & INC/DEC on (HL) (12 cycles each)
+        assert_eq!(cpu.step(), 12); // LD (HL), 0x00 -> (0xC104) = 0x00
+        assert_eq!(cpu.bus.read(0xC104), 0x00);
+        assert_eq!(cpu.registers.pc, 0xC03D);
+
+        assert_eq!(cpu.step(), 12); // DEC (HL) -> (0xC104) = 0xFF (Z=0, N=1, H=1, C=1)
+        assert_eq!(cpu.bus.read(0xC104), 0xFF);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC03E);
+
+        assert_eq!(cpu.step(), 12); // INC (HL) -> (0xC104) = 0x00 (Z=1, N=0, H=1, C=1)
+        assert_eq!(cpu.bus.read(0xC104), 0x00);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC03F);
     }
 
 }
