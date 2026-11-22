@@ -186,6 +186,56 @@ impl CPU {
         }
     }
 
+    fn rotate_circular(&mut self, r: bool, value: u8) -> u8 {
+        if !r { // L
+            let msb = value >> 7 & 1;
+            let res = value << 1 | msb;
+            self.set_flags(res == 0, false, false, msb == 1);
+            res
+        }else{ // R
+            let lsb = value & 1;
+            let res = value >> 1 | lsb << 7;
+            self.set_flags(res == 0, false, false, lsb == 1);
+            res
+        }
+    }
+
+    fn rotate_carry(&mut self, r: bool, value: u8) -> u8 {
+        let c = if self.registers.flag(registers::FLAG_C) { 1 } else { 0 };
+        if !r { // L
+            let msb = value >> 7 & 1;
+            let res = value << 1 | c;
+            self.set_flags(res == 0, false, false, msb == 1);
+            res
+        }else{ // R
+            let lsb = value & 1;
+            let res = value >> 1 | c << 7;
+            self.set_flags(res == 0, false, false, lsb == 1);
+            res
+        }
+    }
+
+    fn arithmetic_shift(&mut self, r: bool, value: u8) -> u8 {
+        if !r { // L
+            let msb = value >> 7 & 1;
+            let res = value << 1;
+            self.set_flags(res == 0, false, false, msb == 1);
+            res
+        }else{ // R
+            let lsb = value & 1;
+            let res = (value as i8) >> 1;
+            self.set_flags(res == 0, false, false, lsb == 1);
+            res as u8
+        }
+    }
+
+    fn logical_shift_r(&mut self, value: u8) -> u8 {
+        let lsb = value & 1;
+        let res = value >> 1;
+        self.set_flags(res == 0, false, false, lsb == 1);
+        res
+    }
+
     pub fn step(&mut self) -> u8 {
         /*
         OPCODE PARTS
@@ -322,31 +372,37 @@ impl CPU {
                         match y {
                             // RLCA, RRCA
                             0..=1 => {
-                                let a = self.registers.a;
-                                if y & 1 == 0{ // L
-                                    let msb = a >> 7 & 1;
-                                    self.set_flags(false, false, false, msb == 1);
-                                    self.registers.a = self.registers.a << 1 | msb;
-                                }else{ // R
-                                    let lsb = a & 1;
-                                    self.set_flags(false, false, false, lsb == 1);
-                                    self.registers.a = self.registers.a >> 1 | lsb << 7;
-                                }
+                                // let a = self.registers.a;
+                                // if y & 1 == 0{ // L
+                                //     let msb = a >> 7 & 1;
+                                //     self.set_flags(false, false, false, msb == 1);
+                                //     self.registers.a = self.registers.a << 1 | msb;
+                                // }else{ // R
+                                //     let lsb = a & 1;
+                                //     self.set_flags(false, false, false, lsb == 1);
+                                //     self.registers.a = self.registers.a >> 1 | lsb << 7;
+                                // }
+                                let res = self.rotate_circular(y & 1 != 0, self.registers.a);
+                                self.registers.a = res;
+                                self.registers.set_flag(registers::FLAG_Z, false);
                                 4
                             },
                             // RLA, RRA
                             2..=3 => {
-                                let a = self.registers.a;
-                                let c = if self.registers.flag(registers::FLAG_C) { 1 } else { 0 };
-                                if y & 1 == 0{ // L
-                                    let msb = a >> 7 & 1;
-                                    self.set_flags(false, false, false, msb == 1);
-                                    self.registers.a = self.registers.a << 1 | c;
-                                }else{ // R
-                                    let lsb = a & 1;
-                                    self.set_flags(false, false, false, lsb == 1);
-                                    self.registers.a = self.registers.a >> 1 | c << 7;
-                                }
+                                // let a = self.registers.a;
+                                // let c = if self.registers.flag(registers::FLAG_C) { 1 } else { 0 };
+                                // if y & 1 == 0{ // L
+                                //     let msb = a >> 7 & 1;
+                                //     self.set_flags(false, false, false, msb == 1);
+                                //     self.registers.a = self.registers.a << 1 | c;
+                                // }else{ // R
+                                //     let lsb = a & 1;
+                                //     self.set_flags(false, false, false, lsb == 1);
+                                //     self.registers.a = self.registers.a >> 1 | c << 7;
+                                // }
+                                let res = self.rotate_carry(y & 1 != 0, self.registers.a);
+                                self.registers.a = res;
+                                self.registers.set_flag(registers::FLAG_Z, false);
                                 4
                             },
 
@@ -557,7 +613,10 @@ impl CPU {
                             },
 
                             // Prefix CB
-                            // 1 => {},
+                            1 => {
+                                let cb_opcode = self.fetch8();
+                                self.cb_prefix(cb_opcode, pc)
+                            },
 
                             // DI
                             6 => {
@@ -633,6 +692,64 @@ impl CPU {
                 }
             }
         }
+    }
+
+    fn cb_prefix(&mut self, opcode: u8, pc: u16) -> u8 {
+        let x = opcode >> 6 & 3;
+        let y = opcode >> 3 & 7;
+        let z = opcode & 7;
+        match opcode {
+            ..=0x3F => {
+                match y {
+                    // RLC / RRC
+                    0 | 1 => {
+                        let res = self.rotate_circular(y == 1, self.get_r(z));
+                        self.set_r(z, res);
+                    },
+                    // RL / RR
+                    2 | 3 => {
+                        let res = self.rotate_carry(y == 3, self.get_r(z));
+                        self.set_r(z, res);
+                    },
+                    // SLA / SRA
+                    4 | 5 => {
+                        let res = self.arithmetic_shift(y == 5, self.get_r(z));
+                        self.set_r(z, res);
+                    },
+                    // SWAP
+                    6 => {
+                        let value = self.get_r(z);
+                        let swap = value >> 4 | value << 4;
+                        self.set_r(z, swap);
+                        self.set_flags(swap == 0, false, false, false);
+                    },
+                    // SRL
+                    7 => {
+                        let res = self.logical_shift_r(self.get_r(z));
+                        self.set_r(z, res);
+                    },
+
+                    _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc + 1)
+                }
+            },
+            // BIT
+            0x40..=0x7F => {
+                let flag_z = (self.get_r(z) >> y & 1) == 0; 
+                self.set_flags(flag_z, false, true, self.registers.flag(registers::FLAG_C));
+            },
+            // RES
+            0x80..=0xBF => {
+                let value = self.get_r(z);
+                let mask = !((1 as u8) << y);
+                self.set_r(z, value & mask);
+            },
+            0xC0.. => {
+                let value = self.get_r(z);
+                let mask = (1 as u8) << y;
+                self.set_r(z, value | mask);
+            }
+        }
+        if z == 6 { if x == 1 {12} else { 16 } } else { 8 }
     }
 
 }
@@ -1932,6 +2049,233 @@ use super::*;
         assert_eq!(cpu.registers.pc, 0xC021);
         assert_eq!(cpu.registers.sp(), 0xFFFE);
         assert_eq!(cpu.ime, true);
+    }
+
+    #[test]
+    fn test_cb_prefixed_instructions() {
+        let bus = Bus::new();
+        let mut cpu = CPU::new(bus);
+        /*
+            // Setup HL = 0xC100 for (HL) CB operations
+            0xC000: LD HL, 0xC100      (HL = 0xC100; PC = 0xC003)
+
+            // 1. Rotations & Shifts on registers (8 cycles each)
+            // Unlike non-CB RLCA/RRCA/RLA/RRA, CB rotations set Z dynamically!
+            0xC003: LD B, 0x80         (B = 0x80; PC = 0xC005)
+            0xC005: RLC B              (B = 0x01; Z=0, N=0, H=0, C=1; PC = 0xC007)
+            0xC007: RRC B              (B = 0x80; Z=0, N=0, H=0, C=1; PC = 0xC009)
+            0xC009: RL B               (B = 0x01; old C=1 -> bit 0; Z=0, N=0, H=0, C=1; PC = 0xC00B)
+            0xC00B: RR B               (B = 0x80; old C=1 -> bit 7; Z=0, N=0, H=0, C=1; PC = 0xC00D)
+
+            // SLA, SRA, SWAP, SRL
+            0xC00D: SLA B              (B = 0x00; Z=1, N=0, H=0, C=1; PC = 0xC00F)
+            0xC00F: LD C, 0x81         (C = 0x81; PC = 0xC011)
+            0xC011: SRA C              (C = 0xC0; bit 7 preserved; Z=0, N=0, H=0, C=1; PC = 0xC013)
+            0xC013: SWAP C             (C = 0x0C; Z=0, N=0, H=0, C=0; PC = 0xC015)
+            0xC015: SRL C              (C = 0x06; bit 7 = 0; Z=0, N=0, H=0, C=0; PC = 0xC017)
+
+            // 2. Rotations & Shifts on (HL) (16 cycles each)
+            0xC017: LD (HL), 0x40      ((0xC100) = 0x40; PC = 0xC019)
+            0xC019: RLC (HL)           ((0xC100) = 0x80; Z=0, N=0, H=0, C=0; PC = 0xC01B)
+            0xC01B: SLA (HL)           ((0xC100) = 0x00; Z=1, N=0, H=0, C=1; PC = 0xC01D)
+            0xC01D: RR (HL)            ((0xC100) = 0x80; old C=1 -> bit 7; Z=0, N=0, H=0, C=0; PC = 0xC01F)
+            0xC01F: SWAP (HL)          ((0xC100) = 0x08; Z=0, N=0, H=0, C=0; PC = 0xC021)
+
+            // 3. BIT b, r (8 cycles) and BIT b, (HL) (12 cycles!) - C flag preserved, N=0, H=1
+            0xC021: SCF                (C = 1; PC = 0xC022)
+            0xC022: LD D, 0x80         (D = 0x80; PC = 0xC024)
+            0xC024: BIT 7, D           (bit 7 is 1 -> Z=0, N=0, H=1, C=1; PC = 0xC026)
+            0xC026: BIT 0, D           (bit 0 is 0 -> Z=1, N=0, H=1, C=1; PC = 0xC028)
+            0xC028: BIT 3, (HL)        ((0xC100)=0x08, bit 3 is 1 -> Z=0, N=0, H=1, C=1; 12 cycles; PC = 0xC02A)
+            0xC02A: BIT 7, (HL)        ((0xC100)=0x08, bit 7 is 0 -> Z=1, N=0, H=1, C=1; 12 cycles; PC = 0xC02C)
+
+            // 4. SET b, r / RES b, r (8 cycles) and SET b, (HL) / RES b, (HL) (16 cycles) - no flags modified
+            0xC02C: SET 0, D           (D = 0x81; Z=1, N=0, H=1, C=1; PC = 0xC02E)
+            0xC02E: RES 7, D           (D = 0x01; Z=1, N=0, H=1, C=1; PC = 0xC030)
+            0xC030: SET 7, (HL)        ((0xC100) = 0x88; flags unchanged; 16 cycles; PC = 0xC032)
+            0xC032: RES 3, (HL)        ((0xC100) = 0x80; flags unchanged; 16 cycles; PC = 0xC034)
+        */
+        load_program(&mut cpu, 0xC000, &[
+            0x21, 0x00, 0xC1, // 0xC000: LD HL, 0xC100
+            0x06, 0x80,       // 0xC003: LD B, 0x80
+            0xCB, 0x00,       // 0xC005: RLC B
+            0xCB, 0x08,       // 0xC007: RRC B
+            0xCB, 0x10,       // 0xC009: RL B
+            0xCB, 0x18,       // 0xC00B: RR B
+            0xCB, 0x20,       // 0xC00D: SLA B
+            0x0E, 0x81,       // 0xC00F: LD C, 0x81
+            0xCB, 0x29,       // 0xC011: SRA C
+            0xCB, 0x31,       // 0xC013: SWAP C
+            0xCB, 0x39,       // 0xC015: SRL C
+            0x36, 0x40,       // 0xC017: LD (HL), 0x40
+            0xCB, 0x06,       // 0xC019: RLC (HL)
+            0xCB, 0x26,       // 0xC01B: SLA (HL)
+            0xCB, 0x1E,       // 0xC01D: RR (HL)
+            0xCB, 0x36,       // 0xC01F: SWAP (HL)
+            0x37,             // 0xC021: SCF
+            0x16, 0x80,       // 0xC022: LD D, 0x80
+            0xCB, 0x7A,       // 0xC024: BIT 7, D
+            0xCB, 0x42,       // 0xC026: BIT 0, D
+            0xCB, 0x5E,       // 0xC028: BIT 3, (HL)
+            0xCB, 0x7E,       // 0xC02A: BIT 7, (HL)
+            0xCB, 0xC2,       // 0xC02C: SET 0, D
+            0xCB, 0xBA,       // 0xC02E: RES 7, D
+            0xCB, 0xFE,       // 0xC030: SET 7, (HL)
+            0xCB, 0x9E,       // 0xC032: RES 3, (HL)
+        ]);
+        cpu.registers.set_pc(0xC000);
+
+        assert_eq!(cpu.step(), 12); // LD HL, 0xC100
+        assert_eq!(cpu.step(), 8);  // LD B, 0x80
+
+        // RLC B (0xCB 0x00) -> 0x01, Z=0, N=0, H=0, C=1
+        assert_eq!(cpu.step(), 8);
+        assert_eq!(cpu.registers.b, 0x01);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC007);
+
+        // RRC B (0xCB 0x08) -> 0x80, Z=0, N=0, H=0, C=1
+        assert_eq!(cpu.step(), 8);
+        assert_eq!(cpu.registers.b, 0x80);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC009);
+
+        // RL B (0xCB 0x10) -> 0x01 (old C=1 enters bit 0), Z=0, C=1
+        assert_eq!(cpu.step(), 8);
+        assert_eq!(cpu.registers.b, 0x01);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC00B);
+
+        // RR B (0xCB 0x18) -> 0x80 (old C=1 enters bit 7), Z=0, C=1
+        assert_eq!(cpu.step(), 8);
+        assert_eq!(cpu.registers.b, 0x80);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC00D);
+
+        // SLA B (0xCB 0x20) -> 0x00 (Z=1 in CB!), N=0, H=0, C=1
+        assert_eq!(cpu.step(), 8);
+        assert_eq!(cpu.registers.b, 0x00);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC00F);
+
+        assert_eq!(cpu.step(), 8);  // LD C, 0x81
+
+        // SRA C (0xCB 0x29) -> 0xC0 (arithmetic shift keeps bit 7), Z=0, C=1
+        assert_eq!(cpu.step(), 8);
+        assert_eq!(cpu.registers.c, 0xC0);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC013);
+
+        // SWAP C (0xCB 0x31) -> 0x0C, Z=0, N=0, H=0, C=0
+        assert_eq!(cpu.step(), 8);
+        assert_eq!(cpu.registers.c, 0x0C);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC015);
+
+        // SRL C (0xCB 0x39) -> 0x06 (logical shift puts 0 in bit 7), Z=0, C=0
+        assert_eq!(cpu.step(), 8);
+        assert_eq!(cpu.registers.c, 0x06);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC017);
+
+        // Memory (HL) rotations/shifts (16 cycles each)
+        assert_eq!(cpu.step(), 12); // LD (HL), 0x40
+        assert_eq!(cpu.step(), 16); // RLC (HL) -> (0xC100) = 0x80, Z=0, C=0
+        assert_eq!(cpu.bus.read(0xC100), 0x80);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC01B);
+
+        assert_eq!(cpu.step(), 16); // SLA (HL) -> (0xC100) = 0x00, Z=1, C=1
+        assert_eq!(cpu.bus.read(0xC100), 0x00);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC01D);
+
+        assert_eq!(cpu.step(), 16); // RR (HL) -> (0xC100) = 0x80, Z=0, C=0
+        assert_eq!(cpu.bus.read(0xC100), 0x80);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC01F);
+
+        assert_eq!(cpu.step(), 16); // SWAP (HL) -> (0xC100) = 0x08, Z=0, C=0
+        assert_eq!(cpu.bus.read(0xC100), 0x08);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC021);
+
+        // BIT b, r (8 cycles) and BIT b, (HL) (12 cycles)
+        assert_eq!(cpu.step(), 4);  // SCF -> C = 1
+        assert_eq!(cpu.step(), 8);  // LD D, 0x80
+
+        assert_eq!(cpu.step(), 8);  // BIT 7, D -> bit is 1 => Z=0, N=0, H=1, C=1 (preserved)
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC026);
+
+        assert_eq!(cpu.step(), 8);  // BIT 0, D -> bit is 0 => Z=1, N=0, H=1, C=1 (preserved)
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC028);
+
+        assert_eq!(cpu.step(), 12); // BIT 3, (HL) -> 12 cycles! (0x08 & 0x08 != 0 => Z=0)
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC02A);
+
+        assert_eq!(cpu.step(), 12); // BIT 7, (HL) -> 12 cycles! (0x08 & 0x80 == 0 => Z=1)
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC02C);
+
+        // SET & RES on registers (8 cycles) and (HL) (16 cycles) - NO flags touched
+        assert_eq!(cpu.step(), 8);  // SET 0, D -> D = 0x81, Z=1, N=0, H=1, C=1 unchanged
+        assert_eq!(cpu.registers.d, 0x81);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC02E);
+
+        assert_eq!(cpu.step(), 8);  // RES 7, D -> D = 0x01
+        assert_eq!(cpu.registers.d, 0x01);
+        assert_eq!(cpu.registers.pc, 0xC030);
+
+        assert_eq!(cpu.step(), 16); // SET 7, (HL) -> (0xC100) = 0x88, 16 cycles
+        assert_eq!(cpu.bus.read(0xC100), 0x88);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC032);
+
+        assert_eq!(cpu.step(), 16); // RES 3, (HL) -> (0xC100) = 0x80, 16 cycles
+        assert_eq!(cpu.bus.read(0xC100), 0x80);
+        assert_eq!(cpu.registers.pc, 0xC034);
     }
 
 }
