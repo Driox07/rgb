@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use super::Cartridge;
 
 
@@ -27,7 +29,8 @@ pub struct Bus {
     oam:  [u8; 0x00A0],
     io:   [u8; 0x0080],
     hram: [u8; 0x007F],
-    ie:    u8
+    ie:    u8,
+    serial: VecDeque<u8>
 }
 
 impl Bus{
@@ -40,7 +43,8 @@ impl Bus{
             oam:  [0; 0x00A0],
             io:   [0; 0x0080],
             hram: [0; 0x007F],
-            ie:    0
+            ie:    0,
+            serial: VecDeque::new()
         }
     }
 
@@ -52,6 +56,10 @@ impl Bus{
             },
             Err(error) => Err(format!("Couldn't load rom: {}", error))
         }
+    }
+
+    pub fn fetch_serial(&mut self) -> Option<u8> {
+        self.serial.pop_front()
     }
 
     pub fn read(&self, addr: u16) -> u8 {
@@ -69,7 +77,13 @@ impl Bus{
             ECHO_BEGIN..=ECHO_END => self.wram[(addr - ECHO_BEGIN) as usize],
             OAM_BEGIN..=OAM_END   => self.oam [(addr - OAM_BEGIN)  as usize],
             NU_BEGIN..=NU_END     => 0xFF,
-            IO_BEGIN..=IO_END     => self.io  [(addr - IO_BEGIN)   as usize],
+            IO_BEGIN..=IO_END     => {
+                if addr == 0xFF44 { // TMP, VBLANK SIMULATION
+                    0x90
+                }else{
+                    self.io  [(addr - IO_BEGIN)   as usize]
+                }
+            },
             HRAM_BEGIN..=HRAM_END => self.hram[(addr - HRAM_BEGIN) as usize],
             IE_ADDR..            => self.ie
         }
@@ -85,7 +99,10 @@ impl Bus{
             WRAM_BEGIN..=WRAM_END => self.wram[(addr - WRAM_BEGIN) as usize] = value,
             ECHO_BEGIN..=ECHO_END => self.wram[(addr - ECHO_BEGIN) as usize] = value,
             OAM_BEGIN..=OAM_END   => self.oam [(addr - OAM_BEGIN)  as usize] = value,
-            IO_BEGIN..=IO_END     => self.io  [(addr - IO_BEGIN)   as usize] = value,
+            IO_BEGIN..=IO_END     => {
+                if addr == 0xFF02 && value == 0x81 { self.serial.push_back(self.io[1]); } // Serial OUT
+                self.io  [(addr - IO_BEGIN)   as usize] = value;
+            },
             HRAM_BEGIN..=HRAM_END => self.hram[(addr - HRAM_BEGIN) as usize] = value,
             IE_ADDR..             => self.ie = value,
             _ => ()
