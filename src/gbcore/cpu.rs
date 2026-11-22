@@ -239,12 +239,29 @@ impl CPU {
                         }
                     },
 
-                    // LD rr, u16
                     1 => {
-                        let rr = y >> 1 & 3;
-                        let value = self.fetch16();
-                        self.set_rr(rr, value, true);
-                        12
+                        match y {
+                            // LD rr, u16
+                            0 | 2 | 4 | 6 => {
+                                let rr = y >> 1 & 3;
+                                let value = self.fetch16();
+                                self.set_rr(rr, value, true);
+                                12
+                            },
+
+                            // ADD HL, rr
+                            1 | 3 | 5 | 7 => {
+                                let rr = y >> 1 & 3;
+                                let hl_value = self.registers.hl();
+                                let rr_value = self.get_rr(rr, true);
+                                let (res, c) = hl_value.overflowing_add(rr_value);
+                                self.registers.set_hl(res);
+                                self.set_flags(self.registers.flag(registers::FLAG_Z), false, (hl_value & 0x0FFF) + (rr_value & 0x0FFF) > 0x0FFF, c);
+                                8
+                            },
+                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                        }
+                        
                     },
 
                     // LD (rr), A y LD A, (rr)
@@ -298,6 +315,67 @@ impl CPU {
                         if y == 6 { 12 } else { 8 }
                     }
 
+                    // DAA, SCF, CPL, CCF
+                    7 => {
+                        match y {
+                            // RLCA, RRCA
+                            0..=1 => {
+                                let a = self.registers.a;
+                                if y & 1 == 0{ // L
+                                    let msb = a >> 7 & 1;
+                                    self.set_flags(false, false, false, msb == 1);
+                                    self.registers.a = self.registers.a << 1 | msb;
+                                }else{ // R
+                                    let lsb = a & 1;
+                                    self.set_flags(false, false, false, lsb == 1);
+                                    self.registers.a = self.registers.a >> 1 | lsb << 7;
+                                }
+                                4
+                            },
+                            // RLA, RRA
+                            2..=3 => {
+                                let a = self.registers.a;
+                                let c = if self.registers.flag(registers::FLAG_C) { 1 } else { 0 };
+                                if y & 1 == 0{ // L
+                                    let msb = a >> 7 & 1;
+                                    self.set_flags(false, false, false, msb == 1);
+                                    self.registers.a = self.registers.a << 1 | c;
+                                }else{ // R
+                                    let lsb = a & 1;
+                                    self.set_flags(false, false, false, lsb == 1);
+                                    self.registers.a = self.registers.a >> 1 | c << 7;
+                                }
+                                4
+                            },
+
+                            // DAA
+                            // 4 => {
+
+                            // },
+
+                            // CPL
+                            5 => {
+                                self.registers.a = !self.registers.a;
+                                self.set_flags(self.registers.flag(registers::FLAG_Z), true, true, self.registers.flag(registers::FLAG_C));
+                                4
+                            },
+                            
+                            // SCF
+                            6 => {
+                                self.set_flags(self.registers.flag(registers::FLAG_Z), false, false, true);
+                                4
+                            },
+
+                            // CCF
+                            7 => {
+                                self.set_flags(self.registers.flag(registers::FLAG_Z), false, false, !self.registers.flag(registers::FLAG_C));
+                                4
+                            },
+
+                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                        }
+                    },
+
                     _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
 
                 }   
@@ -343,9 +421,13 @@ impl CPU {
                             },
 
                             // ADD SP, i8
-                            // 5 => {
-
-                            // },
+                            5 => {
+                                let value = self.fetch8();
+                                let sp_value = self.registers.sp();
+                                self.registers.set_sp(sp_value.wrapping_add_signed((value as i8) as i16));
+                                self.set_flags(false, false, (sp_value & 0xF) + (value as u16 & 0xF) > 0xF, (sp_value & 0xFF) + (value as u16 & 0xFF) > 0xFF);
+                                16
+                            },
 
                             // LDH
                             4 | 6 => {
@@ -360,9 +442,13 @@ impl CPU {
                             },
 
                             // LD HL, SP + i8
-                            // 7 => {
-
-                            // },
+                            7 => {
+                                let value = self.fetch8();
+                                let sp_value = self.registers.sp();
+                                self.registers.set_hl(sp_value.wrapping_add_signed((value as i8) as i16));
+                                self.set_flags(false, false, (sp_value & 0xF) + (value as u16 & 0xF) > 0xF, (sp_value & 0xFF) + (value as u16 & 0xFF) > 0xFF);
+                                12
+                            },
 
                             _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
 
@@ -400,9 +486,10 @@ impl CPU {
                             },
 
                             // LD SP, HL
-                            // 7 => {
-
-                            // },
+                            7 => {
+                                self.registers.set_sp(self.registers.hl());
+                                8
+                            },
 
                             _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
                         }
@@ -509,7 +596,11 @@ impl CPU {
                     },
 
                     // RST
-                    // 7 => {},
+                    7 => {
+                        self.push(self.registers.pc());
+                        self.registers.set_pc((y as u16) << 3 );
+                        16
+                    },
 
                     _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
                 }
@@ -1426,6 +1517,237 @@ use super::*;
         assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
         assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
         assert_eq!(cpu.registers.pc, 0xC03F);
+    }
+
+    #[test]
+    fn test_add16_rotations_and_misc_flags() {
+        let bus = Bus::new();
+        let mut cpu = CPU::new(bus);
+        /*
+            0xC000: LD BC, 0x0FFF      (BC = 0x0FFF; PC = 0xC003)
+            0xC003: LD DE, 0xF001      (DE = 0xF001; PC = 0xC006)
+            0xC006: LD HL, 0x0001      (HL = 0x0001; PC = 0xC009)
+            0xC009: LD SP, 0x0100      (SP = 0x0100; PC = 0xC00C)
+
+            // ADD HL, rr (0x09, 0x19, 0x29, 0x39) - Z preserved, N=0
+            0xC00C: ADD HL, BC         (HL = 0x1000; Z=1, N=0, H=1, C=0; PC = 0xC00D)
+            0xC00D: ADD HL, DE         (HL = 0x0001; Z=1, N=0, H=0, C=1; PC = 0xC00E)
+            0xC00E: ADD HL, HL         (HL = 0x0002; Z=1, N=0, H=0, C=0; PC = 0xC00F)
+            0xC00F: ADD HL, SP         (HL = 0x0102; Z=1, N=0, H=0, C=0; PC = 0xC010)
+
+            // LD SP, HL (0xF9), ADD SP, r8 (0xE8), LD HL, SP + r8 (0xF8)
+            0xC010: LD HL, 0xFFF8      (HL = 0xFFF8; PC = 0xC013)
+            0xC013: LD SP, HL          (SP = 0xFFF8; Z=1, N=0, H=0, C=0; PC = 0xC014)
+            0xC014: ADD SP, +0x08      (SP = 0x0000; Z=0, N=0, H=1, C=1; PC = 0xC016)
+            0xC016: ADD SP, -0x02      (SP = 0xFFFE; Z=0, N=0, H=0, C=0; PC = 0xC018)
+            0xC018: LD HL, SP + 0x02   (HL = 0x0000, SP = 0xFFFE; Z=0, N=0, H=1, C=1; PC = 0xC01A)
+            0xC01A: LD HL, SP - 0x04   (HL = 0xFFFA, SP = 0xFFFE; Z=0, N=0, H=0, C=0; PC = 0xC01C)
+
+            // SCF (0x37), CCF (0x3F), CPL (0x2F)
+            0xC01C: LD A, 0x55         (A = 0x55; PC = 0xC01E)
+            0xC01E: SCF                (Z=0, N=0, H=0, C=1; PC = 0xC01F)
+            0xC01F: CPL                (A = 0xAA; Z=0, N=1, H=1, C=1; PC = 0xC020)
+            0xC020: CCF                (Z=0, N=0, H=0, C=0; PC = 0xC021)
+            0xC021: CCF                (Z=0, N=0, H=0, C=1; PC = 0xC022)
+
+            // Accumulator rotations: RLCA (0x07), RRCA (0x0F), RLA (0x17), RRA (0x1F)
+            0xC022: LD A, 0x81         (A = 0x81; PC = 0xC024)
+            0xC024: RLCA               (A = 0x03; Z=0, N=0, H=0, C=1; PC = 0xC025)
+            0xC025: RRCA               (A = 0x81; Z=0, N=0, H=0, C=1; PC = 0xC026)
+            0xC026: CCF                (Z=0, N=0, H=0, C=0; PC = 0xC027)
+            0xC027: RLA                (A = 0x02; Z=0, N=0, H=0, C=1; PC = 0xC028)
+            0xC028: RRA                (A = 0x81; Z=0, N=0, H=0, C=0; PC = 0xC029)
+            0xC029: LD A, 0x00         (A = 0x00; PC = 0xC02B)
+            0xC02B: RLA                (A = 0x00; Z=0, N=0, H=0, C=0; PC = 0xC02C)
+        */
+        load_program(&mut cpu, 0xC000, &[
+            0x01, 0xFF, 0x0F, // 0xC000: LD BC, 0x0FFF
+            0x11, 0x01, 0xF0, // 0xC003: LD DE, 0xF001
+            0x21, 0x01, 0x00, // 0xC006: LD HL, 0x0001
+            0x31, 0x00, 0x01, // 0xC009: LD SP, 0x0100
+            0x09,             // 0xC00C: ADD HL, BC
+            0x19,             // 0xC00D: ADD HL, DE
+            0x29,             // 0xC00E: ADD HL, HL
+            0x39,             // 0xC00F: ADD HL, SP
+            0x21, 0xF8, 0xFF, // 0xC010: LD HL, 0xFFF8
+            0xF9,             // 0xC013: LD SP, HL
+            0xE8, 0x08,       // 0xC014: ADD SP, +0x08
+            0xE8, 0xFE,       // 0xC016: ADD SP, -0x02
+            0xF8, 0x02,       // 0xC018: LD HL, SP + 0x02
+            0xF8, 0xFC,       // 0xC01A: LD HL, SP - 0x04
+            0x3E, 0x55,       // 0xC01C: LD A, 0x55
+            0x37,             // 0xC01E: SCF
+            0x2F,             // 0xC01F: CPL
+            0x3F,             // 0xC020: CCF
+            0x3F,             // 0xC021: CCF
+            0x3E, 0x81,       // 0xC022: LD A, 0x81
+            0x07,             // 0xC024: RLCA
+            0x0F,             // 0xC025: RRCA
+            0x3F,             // 0xC026: CCF
+            0x17,             // 0xC027: RLA
+            0x1F,             // 0xC028: RRA
+            0x3E, 0x00,       // 0xC029: LD A, 0x00
+            0x17,             // 0xC02B: RLA
+        ]);
+        cpu.registers.set_pc(0xC000);
+        cpu.registers.set_flag(registers::FLAG_Z, true);
+        cpu.registers.set_flag(registers::FLAG_N, true);
+        cpu.registers.set_flag(registers::FLAG_H, false);
+        cpu.registers.set_flag(registers::FLAG_C, true);
+
+        // Setup 16-bit registers
+        assert_eq!(cpu.step(), 12); // LD BC, 0x0FFF
+        assert_eq!(cpu.step(), 12); // LD DE, 0xF001
+        assert_eq!(cpu.step(), 12); // LD HL, 0x0001
+        assert_eq!(cpu.step(), 12); // LD SP, 0x0100
+
+        // ADD HL, rr (8 cycles each, FLAG_Z must remain true, FLAG_N = false)
+        assert_eq!(cpu.step(), 8);  // ADD HL, BC -> 0x0001 + 0x0FFF = 0x1000 (H=1, C=0)
+        assert_eq!(cpu.registers.hl(), 0x1000);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC00D);
+
+        assert_eq!(cpu.step(), 8);  // ADD HL, DE -> 0x1000 + 0xF001 = 0x0001 (H=0, C=1)
+        assert_eq!(cpu.registers.hl(), 0x0001);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC00E);
+
+        assert_eq!(cpu.step(), 8);  // ADD HL, HL -> 0x0001 + 0x0001 = 0x0002 (H=0, C=0)
+        assert_eq!(cpu.registers.hl(), 0x0002);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC00F);
+
+        assert_eq!(cpu.step(), 8);  // ADD HL, SP -> 0x0002 + 0x0100 = 0x0102 (H=0, C=0)
+        assert_eq!(cpu.registers.hl(), 0x0102);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC010);
+
+        // LD SP, HL (8 cycles), ADD SP, r8 (16 cycles), LD HL, SP + r8 (12 cycles)
+        assert_eq!(cpu.step(), 12); // LD HL, 0xFFF8
+        assert_eq!(cpu.step(), 8);  // LD SP, HL -> SP = 0xFFF8 (flags unchanged)
+        assert_eq!(cpu.registers.sp(), 0xFFF8);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.pc, 0xC014);
+
+        assert_eq!(cpu.step(), 16); // ADD SP, +0x08 -> SP = 0x0000 (Z=0, N=0, H=1, C=1)
+        assert_eq!(cpu.registers.sp(), 0x0000);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC016);
+
+        assert_eq!(cpu.step(), 16); // ADD SP, -0x02 (0xFE) -> SP = 0xFFFE (Z=0, N=0, H=0, C=0)
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC018);
+
+        assert_eq!(cpu.step(), 12); // LD HL, SP + 0x02 -> HL = 0x0000, SP = 0xFFFE (Z=0, N=0, H=1, C=1)
+        assert_eq!(cpu.registers.hl(), 0x0000);
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC01A);
+
+        assert_eq!(cpu.step(), 12); // LD HL, SP - 0x04 (0xFC) -> HL = 0xFFFA, SP = 0xFFFE (Z=0, N=0, H=1, C=1)
+        assert_eq!(cpu.registers.hl(), 0xFFFA);
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC01C);
+
+        // SCF, CPL, CCF (4 cycles each)
+        assert_eq!(cpu.step(), 8);  // LD A, 0x55
+        assert_eq!(cpu.step(), 4);  // SCF -> Z=0, N=0, H=0, C=1
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC01F);
+
+        assert_eq!(cpu.step(), 4);  // CPL -> A = 0xAA, Z=0, N=1, H=1, C=1
+        assert_eq!(cpu.registers.a, 0xAA);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC020);
+
+        assert_eq!(cpu.step(), 4);  // CCF -> Z=0, N=0, H=0, C=0
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC021);
+
+        assert_eq!(cpu.step(), 4);  // CCF -> Z=0, N=0, H=0, C=1
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC022);
+
+        // Accumulator rotations: RLCA, RRCA, RLA, RRA (4 cycles each, Z=0, N=0, H=0)
+        assert_eq!(cpu.step(), 8);  // LD A, 0x81
+        assert_eq!(cpu.step(), 4);  // RLCA -> A = 0x03, C = 1
+        assert_eq!(cpu.registers.a, 0x03);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC025);
+
+        assert_eq!(cpu.step(), 4);  // RRCA -> A = 0x81, C = 1
+        assert_eq!(cpu.registers.a, 0x81);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC026);
+
+        assert_eq!(cpu.step(), 4);  // CCF -> C = 0
+        assert_eq!(cpu.step(), 4);  // RLA -> A = 0x02 (old C=0 -> bit 0), C = 1 (old bit 7)
+        assert_eq!(cpu.registers.a, 0x02);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC028);
+
+        assert_eq!(cpu.step(), 4);  // RRA -> A = 0x81 (old C=1 -> bit 7), C = 0 (old bit 0)
+        assert_eq!(cpu.registers.a, 0x81);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC029);
+
+        // Verify Z remains false even when A becomes 0x00
+        assert_eq!(cpu.step(), 8);  // LD A, 0x00
+        assert_eq!(cpu.step(), 4);  // RLA -> A = 0x00, Z = false, C = false
+        assert_eq!(cpu.registers.a, 0x00);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC02C);
     }
 
 }
