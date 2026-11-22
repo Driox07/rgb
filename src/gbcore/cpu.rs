@@ -6,7 +6,10 @@ use super::Bus;
 pub struct CPU {
     pub registers: Registers,
     pub bus: Bus,
-    pub ime: bool
+    pub ime: bool,
+    pub ime_pending: bool,
+    pub halted: bool,
+    pub halt_bug: bool
 }
 
 impl CPU {
@@ -15,13 +18,20 @@ impl CPU {
         CPU{
             registers: Registers::new(),
             bus,
-            ime: false
+            ime: false,
+            ime_pending: false,
+            halted: false,
+            halt_bug: false
         }
     }
 
     fn fetch8(&mut self) -> u8 {
         let fetched = self.bus.read(self.registers.pc());
-        self.registers.inc_pc(1);
+        if self.halt_bug{
+            self.halt_bug = false;
+        }else{
+            self.registers.inc_pc(1);
+        }
         fetched
     }
 
@@ -244,6 +254,28 @@ impl CPU {
         --- ----- -----
         x   y     z
         */
+        let interrupt_pending = self.bus.interrupt_pending();
+
+        if interrupt_pending != 0 {
+            self.halted = false;
+        }
+
+        if self.ime && interrupt_pending != 0 {
+            self.ime = false;
+            let i = interrupt_pending.trailing_zeros() as u8;
+            self.bus.clear_interrupt(i);
+            let addr = 0x40 + 0x08 * i as u16;
+            self.push(self.registers.pc());
+            self.registers.set_pc(addr);
+            return 20;
+        }
+
+        if self.halted {
+            return 4;
+        }
+
+        let ime_pending_before = self.ime_pending;
+
         let pc = self.registers.pc();
         let opcode = self.fetch8();
 
@@ -251,7 +283,7 @@ impl CPU {
         let z = opcode & 7;
         let cond = opcode >> 3 & 3;
 
-        match opcode{
+        let cycles = match opcode{
             ..=0x3F => {
                 match z {
                     0 => {
@@ -460,13 +492,18 @@ impl CPU {
                 
                 // HALT
                 if opcode == 0x76{
-                    panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                    if !self.ime && interrupt_pending != 0{
+                        self.halt_bug = true;
+                    }else{
+                        self.halted = true;
+                    }
+                    4
+                }else{
+                    // Any LD r, r'
+                    self.set_r(y, self.get_r(z));
+                    // If HL have been read or written it takes 8 cycles, else, 4 
+                    if y == 6 || z == 6 { 8 } else { 4 }
                 }
-
-                // Any LD r, r'
-                self.set_r(y, self.get_r(z));
-                // If HL have been read or written it takes 8 cycles, else, 4 
-                if y == 6 || z == 6 { 8 } else { 4 }
             },
 
             // 8b ALU Operations
@@ -620,13 +657,14 @@ impl CPU {
 
                             // DI
                             6 => {
+                                self.ime_pending = false;
                                 self.ime = false;
                                 4
                             },
 
                             // EI
                             7 => {
-                                self.ime = true;
+                                self.ime_pending = true;
                                 4
                             },
 
@@ -691,7 +729,14 @@ impl CPU {
                     _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
                 }
             }
+        };
+
+        if self.ime_pending && ime_pending_before {
+            self.ime_pending = false;
+            self.ime = true;
         }
+
+        cycles
     }
 
     fn cb_prefix(&mut self, opcode: u8, pc: u16) -> u8 {
@@ -2276,6 +2321,188 @@ use super::*;
         assert_eq!(cpu.step(), 16); // RES 3, (HL) -> (0xC100) = 0x80, 16 cycles
         assert_eq!(cpu.bus.read(0xC100), 0x80);
         assert_eq!(cpu.registers.pc, 0xC034);
+    }
+
+    #[test]
+    fn test_interrupts_ei_di_and_halt() {
+        let bus = Bus::new();
+        let mut cpu = CPU::new(bus);
+        /*
+            // All code lives in WRAM (0xC000..), never jumping into 0x0000..=0x7FFF ROM
+            0xC000: LD SP, 0xFFFE      (SP = 0xFFFE; PC = 0xC003)
+
+            // 1. Timer interrupt (IE = 0x04, IF = 0x04, IME = true)
+            0xC003: NOP                (interrupted before execution -> PC = 0x0050, stack pushes 0xC003)
+
+            // 2. Priority test: V-Blank (bit 0) + Timer (bit 2) -> IF = 0x05, IE = 0x05
+            0xC004: NOP                (interrupted -> PC = 0x0040, bit 0 cleared in IF, bit 2 remains)
+
+            // 3. EI delay (1 instruction) & EI followed immediately by DI
+            0xC005: EI                 (IME still false; PC = 0xC006)
+            0xC006: NOP                (IME becomes true after this NOP; PC = 0xC007)
+            0xC007: NOP                (pending Timer interrupt now fires -> PC = 0x0050)
+            0xC008: EI                 (IME false; PC = 0xC009)
+            0xC009: DI                 (cancels scheduled EI -> IME remains false; PC = 0xC00A)
+            0xC00A: NOP                (even with IE/IF set, does NOT jump; PC = 0xC00B)
+
+            // 4. HALT without interrupts, wakeup with IME = false, wakeup with IME = true
+            0xC00B: HALT               (enters HALT; PC = 0xC00C)
+            0xC00C: INC B              (B = 1; runs after wakeup with IME = false; PC = 0xC00D)
+            0xC00D: EI                 (PC = 0xC00E)
+            0xC00E: HALT               (IME becomes true after HALT; enters HALT; PC = 0xC00F)
+            0xC00F: INC B              (wakes up and jumps to vector 0x0048 before executing INC B)
+        */
+        load_program(&mut cpu, 0xC000, &[
+            0x31, 0xFE, 0xFF, // 0xC000: LD SP, 0xFFFE
+            0x00,             // 0xC003: NOP
+            0x00,             // 0xC004: NOP
+            0xFB,             // 0xC005: EI
+            0x00,             // 0xC006: NOP
+            0x00,             // 0xC007: NOP
+            0xFB,             // 0xC008: EI
+            0xF3,             // 0xC009: DI
+            0x00,             // 0xC00A: NOP
+            0x76,             // 0xC00B: HALT
+            0x04,             // 0xC00C: INC B
+            0xFB,             // 0xC00D: EI
+            0x76,             // 0xC00E: HALT
+            0x04,             // 0xC00F: INC B
+        ]);
+        cpu.registers.set_pc(0xC000);
+
+        // Initialize SP
+        assert_eq!(cpu.step(), 12); // LD SP, 0xFFFE
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+        assert_eq!(cpu.registers.pc, 0xC003);
+
+        // -----------------------------------------------------------------
+        // 1. IME = false: pending interrupt must NOT fire; normal instruction runs
+        // -----------------------------------------------------------------
+        cpu.ime = false;
+        cpu.bus.write(0xFFFF, 0x04); // IE: Timer
+        cpu.bus.write(0xFF0F, 0x04); // IF: Timer
+        assert_eq!(cpu.step(), 4);   // Executes NOP at 0xC003 normally
+        assert_eq!(cpu.registers.pc, 0xC004);
+        assert_eq!(cpu.bus.read(0xFF0F) & 0x04, 0x04); // Bit 2 still pending
+
+        // -----------------------------------------------------------------
+        // 2. IME = true, IE = 0x04, IF = 0x04 -> jumps to 0x0050 (20 cycles)
+        // -----------------------------------------------------------------
+        cpu.ime = true;
+        cpu.registers.set_pc(0xC003);
+        assert_eq!(cpu.step(), 20);
+        assert_eq!(cpu.registers.pc, 0x0050);
+        assert_eq!(cpu.ime, false);
+        assert_eq!(cpu.bus.read(0xFF0F) & 0x04, 0x00); // Bit 2 cleared
+        assert_eq!(cpu.registers.sp(), 0xFFFC);
+        assert_eq!(cpu.bus.read(0xFFFD), 0xC0); // Return addr high
+        assert_eq!(cpu.bus.read(0xFFFC), 0x03); // Return addr low
+
+        // Restore SP & PC to 0xC004 (without executing vector ROM)
+        cpu.registers.set_sp(0xFFFE);
+        cpu.registers.set_pc(0xC004);
+
+        // -----------------------------------------------------------------
+        // 3. Priority: IF = 0x05 (V-Blank bit 0 + Timer bit 2) -> jumps to 0x0040
+        // -----------------------------------------------------------------
+        cpu.ime = true;
+        cpu.bus.write(0xFFFF, 0x05); // IE: V-Blank + Timer
+        cpu.bus.write(0xFF0F, 0x05); // IF: V-Blank + Timer
+        assert_eq!(cpu.step(), 20);
+        assert_eq!(cpu.registers.pc, 0x0040);
+        assert_eq!(cpu.ime, false);
+        assert_eq!(cpu.bus.read(0xFF0F) & 0x01, 0x00); // V-Blank cleared
+        assert_eq!(cpu.bus.read(0xFF0F) & 0x04, 0x04); // Timer still pending!
+        assert_eq!(cpu.registers.sp(), 0xFFFC);
+        assert_eq!(cpu.bus.read(0xFFFD), 0xC0);
+        assert_eq!(cpu.bus.read(0xFFFC), 0x04);
+
+        // Restore SP & PC to 0xC005 (Timer bit 2 is still pending in IF = 0x04)
+        cpu.registers.set_sp(0xFFFE);
+        cpu.registers.set_pc(0xC005);
+
+        // -----------------------------------------------------------------
+        // 4. EI delay (1 instruction) -> fires before 0xC007
+        // -----------------------------------------------------------------
+        assert_eq!(cpu.step(), 4);   // 0xC005: EI -> IME must still be false
+        assert_eq!(cpu.ime, false);
+        assert_eq!(cpu.registers.pc, 0xC006);
+
+        assert_eq!(cpu.step(), 4);   // 0xC006: NOP -> IME becomes true after this step
+        assert_eq!(cpu.ime, true);
+        assert_eq!(cpu.registers.pc, 0xC007);
+
+        assert_eq!(cpu.step(), 20);  // Next step services the pending Timer interrupt!
+        assert_eq!(cpu.registers.pc, 0x0050);
+        assert_eq!(cpu.ime, false);
+        assert_eq!(cpu.bus.read(0xFF0F) & 0x04, 0x00);
+
+        // Restore SP & PC to 0xC008
+        cpu.registers.set_sp(0xFFFE);
+        cpu.registers.set_pc(0xC008);
+
+        // -----------------------------------------------------------------
+        // 5. EI followed immediately by DI -> IME never becomes true
+        // -----------------------------------------------------------------
+        cpu.bus.write(0xFFFF, 0x01); // IE: V-Blank
+        cpu.bus.write(0xFF0F, 0x01); // IF: V-Blank
+        assert_eq!(cpu.step(), 4);   // 0xC008: EI
+        assert_eq!(cpu.ime, false);
+        assert_eq!(cpu.registers.pc, 0xC009);
+
+        assert_eq!(cpu.step(), 4);   // 0xC009: DI (cancels scheduled EI)
+        assert_eq!(cpu.ime, false);
+        assert_eq!(cpu.registers.pc, 0xC00A);
+
+        assert_eq!(cpu.step(), 4);   // 0xC00A: NOP (must NOT jump)
+        assert_eq!(cpu.ime, false);
+        assert_eq!(cpu.registers.pc, 0xC00B);
+
+        // -----------------------------------------------------------------
+        // 6. HALT without interrupts, wakeup with IME = false, wakeup with IME = true
+        // -----------------------------------------------------------------
+        cpu.bus.write(0xFFFF, 0x00); // Clear IE
+        cpu.bus.write(0xFF0F, 0x00); // Clear IF
+        cpu.registers.b = 0;
+
+        assert_eq!(cpu.step(), 4);   // 0xC00B: HALT -> enters halted state, PC = 0xC00C
+        assert_eq!(cpu.registers.pc, 0xC00C);
+
+        // Multiple steps while halted with no pending interrupts: 4 cycles each, PC frozen
+        for _ in 0..4 {
+            assert_eq!(cpu.step(), 4);
+            assert_eq!(cpu.registers.pc, 0xC00C);
+        }
+
+        // Trigger LCD STAT interrupt with IME = false -> wakes up and executes INC B (0xC00C)
+        cpu.bus.write(0xFFFF, 0x02); // IE: LCD STAT
+        cpu.bus.write(0xFF0F, 0x02); // IF: LCD STAT
+        assert_eq!(cpu.step(), 4);   // Wakes up and executes INC B at 0xC00C
+        assert_eq!(cpu.registers.b, 1);
+        assert_eq!(cpu.registers.pc, 0xC00D);
+        assert_eq!(cpu.bus.read(0xFF0F) & 0x02, 0x02); // IF not cleared when IME = false
+
+        // Clear IF, then execute EI (0xC00D) followed by HALT (0xC00E)
+        cpu.bus.write(0xFF0F, 0x00);
+        assert_eq!(cpu.step(), 4);   // 0xC00D: EI
+        assert_eq!(cpu.step(), 4);   // 0xC00E: HALT -> IME becomes true, PC = 0xC00F
+        assert_eq!(cpu.ime, true);
+        assert_eq!(cpu.registers.pc, 0xC00F);
+
+        // Halted step with no interrupts yet
+        assert_eq!(cpu.step(), 4);
+        assert_eq!(cpu.registers.pc, 0xC00F);
+
+        // Trigger LCD STAT interrupt with IME = true -> wakes up and jumps to 0x0048
+        cpu.bus.write(0xFF0F, 0x02);
+        assert_eq!(cpu.step(), 20);
+        assert_eq!(cpu.registers.pc, 0x0048);
+        assert_eq!(cpu.registers.b, 1); // INC B at 0xC00F did NOT run yet
+        assert_eq!(cpu.ime, false);
+        assert_eq!(cpu.bus.read(0xFF0F) & 0x02, 0x00);
+        assert_eq!(cpu.registers.sp(), 0xFFFC);
+        assert_eq!(cpu.bus.read(0xFFFD), 0xC0);
+        assert_eq!(cpu.bus.read(0xFFFC), 0x0F);
     }
 
 }

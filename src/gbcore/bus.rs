@@ -62,6 +62,14 @@ impl Bus{
         self.serial.pop_front()
     }
 
+    pub fn interrupt_pending(&self) -> u8 {
+        self.ie & self.read(0xFF0F) & 0x1F
+    }
+
+    pub fn clear_interrupt(&mut self, i: u8) {
+        self.write(0xFF0F, self.read(0xFF0F) & !(1 << i));
+    } 
+
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
             ..=ROM_END   => match &self.rom{
@@ -80,6 +88,8 @@ impl Bus{
             IO_BEGIN..=IO_END     => {
                 if addr == 0xFF44 { // TMP, VBLANK SIMULATION
                     0x90
+                } else if addr == 0xFF0F {
+                    self.io[0x0F] | 0xE0
                 }else{
                     self.io  [(addr - IO_BEGIN)   as usize]
                 }
