@@ -5,7 +5,8 @@ use super::Bus;
 
 pub struct CPU {
     pub registers: Registers,
-    pub bus: Bus
+    pub bus: Bus,
+    pub ime: bool
 }
 
 impl CPU {
@@ -13,7 +14,8 @@ impl CPU {
     pub fn new(bus: Bus) -> CPU {
         CPU{
             registers: Registers::new(),
-            bus
+            bus,
+            ime: false
         }
     }
 
@@ -349,9 +351,26 @@ impl CPU {
                             },
 
                             // DAA
-                            // 4 => {
-
-                            // },
+                            4 => {
+                                if !self.registers.flag(registers::FLAG_N) {
+                                    if self.registers.flag(registers::FLAG_C) || self.registers.a > 0x99 {
+                                        self.registers.a = self.registers.a.wrapping_add(0x60);
+                                        self.registers.set_flag(registers::FLAG_C, true);
+                                    }
+                                    if self.registers.flag(registers::FLAG_H) || self.registers.a & 0xF > 9 {
+                                        self.registers.a = self.registers.a.wrapping_add(0x06);
+                                    }
+                                }else{
+                                    if self.registers.flag(registers::FLAG_C) {
+                                        self.registers.a = self.registers.a.wrapping_sub(0x60);
+                                    }
+                                    if self.registers.flag(registers::FLAG_H) {
+                                        self.registers.a = self.registers.a.wrapping_sub(0x06);
+                                    } 
+                                }
+                                self.set_flags(self.registers.a == 0, self.registers.flag(registers::FLAG_N), false, self.registers.flag(registers::FLAG_C));
+                                4
+                            },
 
                             // CPL
                             5 => {
@@ -372,11 +391,11 @@ impl CPU {
                                 4
                             },
 
-                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                            _ => panic!("Illegal opcode: {:#04X} at PC = {:#06X}", opcode, pc)
                         }
                     },
 
-                    _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                    _ => panic!("Illegal opcode: {:#04X} at PC = {:#06X}", opcode, pc)
 
                 }   
             },
@@ -450,8 +469,7 @@ impl CPU {
                                 12
                             },
 
-                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
-
+                            _ => panic!("Illegal opcode: {:#04X} at PC = {:#06X}", opcode, pc)
                         }
 
                     },
@@ -459,17 +477,13 @@ impl CPU {
                     1 => {
                         match y {
 
-                            // RET
-                            1 => {
+                            // RET / RETI
+                            1 | 3 => {
                                 let stored_pc = self.pop();
                                 self.registers.set_pc(stored_pc);
+                                if y == 3 { self.ime = true; }
                                 16
                             },
-
-                            // RETI
-                            // 3 => {
-
-                            // },
 
                             // POP
                             0 | 2 | 4 | 6 => {
@@ -491,7 +505,7 @@ impl CPU {
                                 8
                             },
 
-                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                            _ => panic!("Illegal opcode: {:#04X} at PC = {:#06X}", opcode, pc)
                         }
                     },
 
@@ -529,7 +543,7 @@ impl CPU {
                                 16
                             },
 
-                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                            _ => panic!("Illegal opcode: {:#04X} at PC = {:#06X}", opcode, pc)
                         } 
                     },
                     
@@ -546,25 +560,38 @@ impl CPU {
                             // 1 => {},
 
                             // DI
-                            // 6 => {},
+                            6 => {
+                                self.ime = false;
+                                4
+                            },
 
                             // EI
-                            // 7 => {},
+                            7 => {
+                                self.ime = true;
+                                4
+                            },
 
-                            _ => panic!("Not implemented: {:#04X} at PC = {:#06X}", opcode, pc)
+                            _ => panic!("Illegal opcode: {:#04X} at PC = {:#06X}", opcode, pc)
                         }
                     },
 
                     // CALL CC, 
                     4 => {
-                        let addr = self.fetch16();
-                        if self.check_condition(cond) {
-                            self.push(self.registers.pc());
-                            self.registers.set_pc(addr);
-                            24
-                        }else{
-                            12
+                        match y {
+                            0..=3 => {
+                                let addr = self.fetch16();
+                                if self.check_condition(cond) {
+                                    self.push(self.registers.pc());
+                                    self.registers.set_pc(addr);
+                                    24
+                                }else{
+                                    12
+                                }
+                            },
+
+                            _ => panic!("Illegal opcode: {:#04X} at PC = {:#06X}", opcode, pc)
                         }
+                        
                     },
 
                     5 => {
@@ -1748,6 +1775,163 @@ use super::*;
         assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
         assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
         assert_eq!(cpu.registers.pc, 0xC02C);
+    }
+
+    #[test]
+    fn test_rst_daa_interrupt_flags_and_reti() {
+        let bus = Bus::new();
+        let mut cpu = CPU::new(bus);
+        /*
+            // Main test routine at 0xC000
+            0xC000: LD SP, 0xFFFE      (SP = 0xFFFE; PC = 0xC003)
+
+            // RST 00H .. RST 38H (0xC7, 0xCF, 0xD7, 0xDF, 0xE7, 0xEF, 0xF7, 0xFF)
+            // Since 0x0000..=0x0038 is read-only ROM, each step verifies the jump target
+            // and pushed return address, then restores PC to the next RST instruction.
+            0xC003: RST 00H            (SP = 0xFFFC; (0xFFFD)=0xC0, (0xFFFC)=0x04; PC = 0x0000)
+            0xC004: RST 08H            (SP = 0xFFFA; (0xFFFB)=0xC0, (0xFFFA)=0x05; PC = 0x0008)
+            0xC005: RST 10H            (SP = 0xFFF8; (0xFFF9)=0xC0, (0xFFF8)=0x06; PC = 0x0010)
+            0xC006: RST 18H            (SP = 0xFFF6; (0xFFF7)=0xC0, (0xFFF6)=0x07; PC = 0x0018)
+            0xC007: RST 20H            (SP = 0xFFF4; (0xFFF5)=0xC0, (0xFFF4)=0x08; PC = 0x0020)
+            0xC008: RST 28H            (SP = 0xFFF2; (0xFFF3)=0xC0, (0xFFF2)=0x09; PC = 0x0028)
+            0xC009: RST 30H            (SP = 0xFFF0; (0xFFF1)=0xC0, (0xFFF0)=0x0A; PC = 0x0030)
+            0xC00A: RST 38H            (SP = 0xFFEE; (0xFFEF)=0xC0, (0xFFEE)=0x0B; PC = 0x0038)
+
+            // DAA (0x27) - BCD addition and subtraction cases
+            0xC00B: LD A, 0x15         (A = 0x15; PC = 0xC00D)
+            0xC00D: ADD A, 0x27        (A = 0x3C; Z=0, N=0, H=0, C=0; PC = 0xC00F)
+            0xC00F: DAA                (A = 0x42; Z=0, N=0, H=0, C=0; PC = 0xC010)
+            0xC010: ADD A, 0x58        (A = 0x9A; Z=0, N=0, H=0, C=0; PC = 0xC012)
+            0xC012: DAA                (A = 0x00; Z=1, N=0, H=0, C=1; PC = 0xC013)
+            0xC013: LD A, 0x42         (A = 0x42; PC = 0xC015)
+            0xC015: SUB 0x15           (A = 0x2D; Z=0, N=1, H=1, C=0; PC = 0xC017)
+            0xC017: DAA                (A = 0x27; Z=0, N=1, H=0, C=0; PC = 0xC018)
+            0xC018: SUB 0x30           (A = 0xF7; Z=0, N=1, H=0, C=1; PC = 0xC01A)
+            0xC01A: DAA                (A = 0x97; Z=0, N=1, H=0, C=1; PC = 0xC01B)
+
+            // DI (0xF3), EI (0xFB), and RETI (0xD9)
+            0xC01B: EI                 (IME enabled after following instruction; PC = 0xC01C)
+            0xC01C: NOP                (IME = true; PC = 0xC01D)
+            0xC01D: DI                 (IME = false immediately; PC = 0xC01E)
+            0xC01E: CALL 0xC022        (SP = 0xFFFC; (0xFFFD)=0xC0, (0xFFFC)=0x21; PC = 0xC022)
+            0xC021: NOP                (PC = 0xC022)
+            0xC022: RETI               (PC = 0xC021; SP = 0xFFFE; IME = true)
+        */
+
+        load_program(&mut cpu, 0xC000, &[
+            0x31, 0xFE, 0xFF, // 0xC000: LD SP, 0xFFFE
+            0xC7,             // 0xC003: RST 00H
+            0xCF,             // 0xC004: RST 08H
+            0xD7,             // 0xC005: RST 10H
+            0xDF,             // 0xC006: RST 18H
+            0xE7,             // 0xC007: RST 20H
+            0xEF,             // 0xC008: RST 28H
+            0xF7,             // 0xC009: RST 30H
+            0xFF,             // 0xC00A: RST 38H
+            0x3E, 0x15,       // 0xC00B: LD A, 0x15
+            0xC6, 0x27,       // 0xC00D: ADD A, 0x27
+            0x27,             // 0xC00F: DAA
+            0xC6, 0x58,       // 0xC010: ADD A, 0x58
+            0x27,             // 0xC012: DAA
+            0x3E, 0x42,       // 0xC013: LD A, 0x42
+            0xD6, 0x15,       // 0xC015: SUB 0x15
+            0x27,             // 0xC017: DAA
+            0xD6, 0x30,       // 0xC018: SUB 0x30
+            0x27,             // 0xC01A: DAA
+            0xFB,             // 0xC01B: EI
+            0x00,             // 0xC01C: NOP
+            0xF3,             // 0xC01D: DI
+            0xCD, 0x22, 0xC0, // 0xC01E: CALL 0xC022
+            0x00,             // 0xC021: NOP
+            0xD9,             // 0xC022: RETI
+        ]);
+        cpu.registers.set_pc(0xC000);
+
+        // Initialize stack pointer
+        assert_eq!(cpu.step(), 12); // LD SP, 0xFFFE
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+        assert_eq!(cpu.registers.pc, 0xC003);
+
+        // Verify all 8 RST vectors (16 cycles each) and stack return addresses
+        for (i, expected_vec) in (0x0000u16..=0x0038).step_by(8).enumerate() {
+            let return_addr = 0xC004 + (i as u16);
+            let expected_sp = 0xFFFE - 2 * ((i as u16) + 1);
+
+            assert_eq!(cpu.step(), 16); // RST vec
+            assert_eq!(cpu.registers.pc, expected_vec);
+            assert_eq!(cpu.registers.sp(), expected_sp);
+            assert_eq!(cpu.bus.read(expected_sp + 1), (return_addr >> 8) as u8);
+            assert_eq!(cpu.bus.read(expected_sp), (return_addr & 0xFF) as u8);
+
+            // Restore PC to continue sequential execution in WRAM
+            cpu.registers.set_pc(return_addr);
+        }
+
+        // Reset SP for the CALL/RETI section
+        cpu.registers.set_sp(0xFFFE);
+
+        // DAA after BCD addition without carry: 15 + 27 = 42
+        assert_eq!(cpu.step(), 8);  // LD A, 0x15
+        assert_eq!(cpu.step(), 8);  // ADD A, 0x27 -> A = 0x3C
+        assert_eq!(cpu.step(), 4);  // DAA -> A = 0x42 (Z=0, N=0, H=0, C=0)
+        assert_eq!(cpu.registers.a, 0x42);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC010);
+
+        // DAA after BCD addition with overflow to zero: 42 + 58 = 100 -> 00, C=1
+        assert_eq!(cpu.step(), 8);  // ADD A, 0x58 -> A = 0x9A
+        assert_eq!(cpu.step(), 4);  // DAA -> A = 0x00 (Z=1, N=0, H=0, C=1)
+        assert_eq!(cpu.registers.a, 0x00);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC013);
+
+        // DAA after BCD subtraction with half-borrow: 42 - 15 = 27
+        assert_eq!(cpu.step(), 8);  // LD A, 0x42
+        assert_eq!(cpu.step(), 8);  // SUB 0x15 -> A = 0x2D (N=1, H=1, C=0)
+        assert_eq!(cpu.step(), 4);  // DAA -> A = 0x27 (Z=0, N=1, H=0, C=0)
+        assert_eq!(cpu.registers.a, 0x27);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), false);
+        assert_eq!(cpu.registers.pc, 0xC018);
+
+        // DAA after BCD subtraction with borrow: 27 - 30 = -3 -> 97, C=1
+        assert_eq!(cpu.step(), 8);  // SUB 0x30 -> A = 0xF7 (N=1, H=0, C=1)
+        assert_eq!(cpu.step(), 4);  // DAA -> A = 0x97 (Z=0, N=1, H=0, C=1)
+        assert_eq!(cpu.registers.a, 0x97);
+        assert_eq!(cpu.registers.flag(registers::FLAG_Z), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_N), true);
+        assert_eq!(cpu.registers.flag(registers::FLAG_H), false);
+        assert_eq!(cpu.registers.flag(registers::FLAG_C), true);
+        assert_eq!(cpu.registers.pc, 0xC01B);
+
+        // EI (delayed by 1 instruction), DI (immediate), and RETI (16 cycles, sets IME = true)
+        assert_eq!(cpu.step(), 4);  // EI (schedules IME = true after next instruction)
+        assert_eq!(cpu.registers.pc, 0xC01C);
+
+        assert_eq!(cpu.step(), 4);  // NOP (IME becomes true now)
+        assert_eq!(cpu.ime, true);
+        assert_eq!(cpu.registers.pc, 0xC01D);
+
+        assert_eq!(cpu.step(), 4);  // DI (IME = false immediately)
+        assert_eq!(cpu.ime, false);
+        assert_eq!(cpu.registers.pc, 0xC01E);
+
+        assert_eq!(cpu.step(), 24); // CALL 0xC022
+        assert_eq!(cpu.registers.pc, 0xC022);
+        assert_eq!(cpu.registers.sp(), 0xFFFC);
+
+        assert_eq!(cpu.step(), 16); // RETI -> PC = 0xC021, SP = 0xFFFE, IME = true
+        assert_eq!(cpu.registers.pc, 0xC021);
+        assert_eq!(cpu.registers.sp(), 0xFFFE);
+        assert_eq!(cpu.ime, true);
     }
 
 }
