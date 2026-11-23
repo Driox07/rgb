@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use super::Cartridge;
+use super::Timer;
 
 
 const ROM_END:    u16 = 0x7FFF;
@@ -30,6 +31,7 @@ pub struct Bus {
     io:   [u8; 0x0080],
     hram: [u8; 0x007F],
     ie:    u8,
+    timer: Timer,
     serial: VecDeque<u8>
 }
 
@@ -44,6 +46,7 @@ impl Bus{
             io:   [0; 0x0080],
             hram: [0; 0x007F],
             ie:    0,
+            timer: Timer::new(),
             serial: VecDeque::new()
         }
     }
@@ -58,12 +61,22 @@ impl Bus{
         }
     }
 
+    pub fn tick_timer(&mut self, t: u8) {
+        if self.timer.tick(t) {
+            self.request_interrupt(super::timer::TIMER_IF_BIT);
+        }
+    }
+
     pub fn fetch_serial(&mut self) -> Option<u8> {
         self.serial.pop_front()
     }
 
     pub fn interrupt_pending(&self) -> u8 {
         self.ie & self.read(0xFF0F) & 0x1F
+    }
+
+    pub fn request_interrupt(&mut self, i: u8) {
+        self.write(0xFF0F, self.read(0xFF0F) | (1 << i));
     }
 
     pub fn clear_interrupt(&mut self, i: u8) {
@@ -86,12 +99,26 @@ impl Bus{
             OAM_BEGIN..=OAM_END   => self.oam [(addr - OAM_BEGIN)  as usize],
             NU_BEGIN..=NU_END     => 0xFF,
             IO_BEGIN..=IO_END     => {
-                if addr == 0xFF44 { // TMP, VBLANK SIMULATION
-                    0x90
-                } else if addr == 0xFF0F {
-                    self.io[0x0F] | 0xE0
-                }else{
-                    self.io  [(addr - IO_BEGIN)   as usize]
+
+                match addr {
+                    
+                    0xFF04 => self.timer.div(),
+
+                    0xFF05 => self.timer.tima(),
+
+                    0xFF06 => self.timer.tma(),
+
+                    0xFF07 => self.timer.tac(),
+
+                    0xFF0F => {
+                        self.io[0x0F] | 0xE0
+                    },
+
+                    0xFF44 => { // TMP, VBLANK SIMULATION
+                        0x90
+                    },
+
+                    _=> self.io  [(addr - IO_BEGIN)   as usize]
                 }
             },
             HRAM_BEGIN..=HRAM_END => self.hram[(addr - HRAM_BEGIN) as usize],
@@ -110,8 +137,23 @@ impl Bus{
             ECHO_BEGIN..=ECHO_END => self.wram[(addr - ECHO_BEGIN) as usize] = value,
             OAM_BEGIN..=OAM_END   => self.oam [(addr - OAM_BEGIN)  as usize] = value,
             IO_BEGIN..=IO_END     => {
-                if addr == 0xFF02 && value == 0x81 { self.serial.push_back(self.io[1]); } // Serial OUT
-                self.io  [(addr - IO_BEGIN)   as usize] = value;
+                
+                match addr {
+                    0xFF02 => {
+                        if value == 0x81 { self.serial.push_back(self.io[1]); }
+                        self.io [(addr - IO_BEGIN) as usize] = value
+                    },
+
+                    0xFF04 => self.timer.set_div(),
+
+                    0xFF05 => self.timer.set_tima(value),
+
+                    0xFF06 => self.timer.set_tma(value),
+
+                    0xFF07 => self.timer.set_tac(value),
+
+                    _ => self.io [(addr - IO_BEGIN) as usize] = value,
+                }
             },
             HRAM_BEGIN..=HRAM_END => self.hram[(addr - HRAM_BEGIN) as usize] = value,
             IE_ADDR..             => self.ie = value,

@@ -25,13 +25,15 @@ fn main() {
     let mut cpu = CPU::new(bus);
     loop { 
         let pc = cpu.registers.pc();
-        cpu.step();
+        let cycles = cpu.step();
+        cpu.bus.tick_timer(cycles);
+        
         let serial = cpu.bus.fetch_serial();
         if serial != None {
             print!("{}", serial.unwrap() as char);
             let _ = std::io::Write::flush(&mut std::io::stdout());
         }
-        if cpu.registers.pc() == pc {
+        if !cpu.halted && cpu.registers.pc() == pc {
             println!();
             println!("ROM entered an infinite loop at PC {:#06X}", pc);
             break;
