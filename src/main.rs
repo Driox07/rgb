@@ -27,6 +27,7 @@ fn main() {
         let pc = cpu.registers.pc();
         let cycles = cpu.step();
         cpu.bus.tick_timer(cycles);
+        cpu.bus.tick_ppu(cycles);
         
         let serial = cpu.bus.fetch_serial();
         if serial != None {

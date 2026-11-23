@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use super::Cartridge;
 use super::Timer;
+use super::PPU;
 
 
 const ROM_END:    u16 = 0x7FFF;
@@ -32,6 +33,7 @@ pub struct Bus {
     hram: [u8; 0x007F],
     ie:    u8,
     timer: Timer,
+    ppu: PPU,
     serial: VecDeque<u8>
 }
 
@@ -47,6 +49,7 @@ impl Bus{
             hram: [0; 0x007F],
             ie:    0,
             timer: Timer::new(),
+            ppu: PPU::new(),
             serial: VecDeque::new()
         }
     }
@@ -64,6 +67,12 @@ impl Bus{
     pub fn tick_timer(&mut self, t: u8) {
         if self.timer.tick(t) {
             self.request_interrupt(super::timer::TIMER_IF_BIT);
+        }
+    }
+
+    pub fn tick_ppu(&mut self, t: u8) {
+        if self.ppu.tick(t) {
+            self.request_interrupt(super::ppu::PPU_IF_BIT);
         }
     }
 
@@ -114,8 +123,8 @@ impl Bus{
                         self.io[0x0F] | 0xE0
                     },
 
-                    0xFF44 => { // TMP, VBLANK SIMULATION
-                        0x90
+                    0xFF44 => {
+                        self.ppu.ly()
                     },
 
                     _=> self.io  [(addr - IO_BEGIN)   as usize]
