@@ -26,7 +26,6 @@ const IE_ADDR:    u16 = 0xFFFF;
 
 pub struct Bus {
     rom:  Option<Cartridge>,
-    vram: [u8; 0x2000],
     wram: [u8; 0x2000],
     oam:  [u8; 0x00A0],
     io:   [u8; 0x0080],
@@ -42,7 +41,6 @@ impl Bus{
     pub fn new() -> Bus {
         Bus{
             rom:  None,
-            vram: [0; 0x2000],
             wram: [0; 0x2000],
             oam:  [0; 0x00A0],
             io:   [0; 0x0080],
@@ -97,7 +95,7 @@ impl Bus{
                 Some(c) => c.read(addr),
                 None => 0xFF
             },
-            VRAM_BEGIN..=VRAM_END => self.vram[(addr - VRAM_BEGIN) as usize],
+            VRAM_BEGIN..=VRAM_END => self.ppu.read_vram(addr - VRAM_BEGIN),
             ERAM_BEGIN..=ERAM_END => match &self.rom{
                 Some(c) => c.read(addr),
                 None => 0xFF
@@ -122,13 +120,21 @@ impl Bus{
                         self.io[0x0F] | 0xE0
                     },
 
+                    0xFF40 => self.ppu.lcdc(),
+
                     0xFF41 => self.ppu.stat(),
+
+                    0xFF42 => self.ppu.scy(),
+
+                    0xFF43 => self.ppu.scx(),
 
                     0xFF44 => {
                         self.ppu.ly()
                     },
 
                     0xFF45 => self.ppu.lyc(),
+
+                    0xFF47 => self.ppu.bgp(),
 
                     _=> self.io  [(addr - IO_BEGIN)   as usize]
                 }
@@ -140,7 +146,7 @@ impl Bus{
 
     pub fn write(&mut self, addr: u16, value: u8) {
         match addr {
-            VRAM_BEGIN..=VRAM_END => self.vram[(addr - VRAM_BEGIN) as usize] = value,
+            VRAM_BEGIN..=VRAM_END => self.ppu.write_vram(addr - VRAM_BEGIN, value),
             ERAM_BEGIN..=ERAM_END => match &mut self.rom{
                 Some(c) => c.write(addr, value),
                 None => ()
@@ -163,10 +169,18 @@ impl Bus{
                     0xFF06 => self.timer.set_tma(value),
 
                     0xFF07 => self.timer.set_tac(value),
+
+                    0xFF40 => self.ppu.set_lcdc(value),
                     
                     0xFF41 => self.ppu.set_stat(value),
 
+                    0xFF42 => self.ppu.set_scy(value),
+
+                    0xFF43 => self.ppu.set_scx(value),
+
                     0xFF45 => self.ppu.set_lyc(value),
+
+                    0xFF47 => self.ppu.set_bgp(value),
 
                     _ => self.io [(addr - IO_BEGIN) as usize] = value,
                 }
