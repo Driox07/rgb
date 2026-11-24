@@ -71,9 +71,8 @@ impl Bus{
     }
 
     pub fn tick_ppu(&mut self, t: u8) {
-        if self.ppu.tick(t) {
-            self.request_interrupt(super::ppu::PPU_IF_BIT);
-        }
+        let int_mask = self.ppu.tick(t);
+        self.write(0xFF0F, self.read(0xFF0F) | int_mask);
     }
 
     pub fn fetch_serial(&mut self) -> Option<u8> {
@@ -123,9 +122,13 @@ impl Bus{
                         self.io[0x0F] | 0xE0
                     },
 
+                    0xFF41 => self.ppu.stat(),
+
                     0xFF44 => {
                         self.ppu.ly()
                     },
+
+                    0xFF45 => self.ppu.lyc(),
 
                     _=> self.io  [(addr - IO_BEGIN)   as usize]
                 }
@@ -160,6 +163,10 @@ impl Bus{
                     0xFF06 => self.timer.set_tma(value),
 
                     0xFF07 => self.timer.set_tac(value),
+                    
+                    0xFF41 => self.ppu.set_stat(value),
+
+                    0xFF45 => self.ppu.set_lyc(value),
 
                     _ => self.io [(addr - IO_BEGIN) as usize] = value,
                 }
