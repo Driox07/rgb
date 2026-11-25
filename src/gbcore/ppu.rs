@@ -30,21 +30,39 @@ const TILE_MAP_B: u16 = 0x9C00;
 const TILE_DATA_BYTES: u16 = 16;
 const TILE_MAP_SIZE: u16 = 32;
 
+const OAM_ITEM_BYTES: u16 = 4;
+const OAM_ITEM_Y: u16 = 0;
+const OAM_ITEM_X: u16 = 1;
+const OAM_ITEM_TILE_IDX: u16 = 2;
+const OAM_ITEM_FLAGS: u16 = 3;
+
+const OAM_FLAG_PRIORITY: u8 = 0x80;
+const OAM_FLAG_V_FLIP: u8 = 0x40;
+const OAM_FLAG_H_FLIP: u8 = 0x20;
+const OAM_FLAG_PAL: u8 = 0x10;
+
 const SCREEN_W: u8 = 160;
 const SCREEN_H: u8 = 144;
 
 pub struct PPU {
     vram: [u8; 0x2000],
+    oam:  [u8; 0x00A0],
     frame_buffer: [u8; (SCREEN_W as u16 * SCREEN_H as u16) as usize],
     line_progress: u16,
     ly: u8,
     stat: u8,
     lyc: u8,
     last_stat_state: bool,
+
     lcdc: u8,
     scy: u8,
     scx: u8,
-    bgp: u8
+    bgp: u8,
+
+    obp0: u8,
+    obp1: u8,
+    oam_line_items: [u8; 10],
+    oam_line_items_count: u8
 }
 
 impl PPU {
@@ -52,16 +70,23 @@ impl PPU {
     pub fn new() -> PPU {
         PPU {
             vram: [0; 0x2000],
+            oam:  [0; 0x00A0],
             frame_buffer: [0; 160 * 144],
             line_progress: 0,
             ly: 0,
             stat: 0x80,
             lyc: 0,
             last_stat_state: false,
+
             lcdc: 0,
             scy: 0,
             scx: 0,
-            bgp: 0
+            bgp: 0,
+
+            obp0: 0,
+            obp1: 0,
+            oam_line_items: [0; 10],
+            oam_line_items_count: 0
         }
     }
 
@@ -84,6 +109,14 @@ impl PPU {
 
     pub fn write_vram(&mut self, addr: u16, value: u8) {
         self.vram[addr as usize] = value;
+    }
+
+    pub fn read_oam(&self, addr: u16) -> u8 {
+        self.oam[addr as usize]
+    }
+
+    pub fn write_oam(&mut self, addr: u16, value: u8) {
+        self.oam[addr as usize] = value;
     }
 
     pub fn lcdc(&self) -> u8 {
@@ -139,6 +172,22 @@ impl PPU {
         self.ly
     }
 
+    pub fn obp0(&self) -> u8 {
+        self.obp0
+    }
+
+    pub fn set_obp0(&mut self, value: u8) {
+        self.obp0 = value;
+    }
+
+    pub fn obp1(&self) -> u8 {
+        self.obp1
+    }
+
+    pub fn set_obp1(&mut self, value: u8) {
+        self.obp1 = value;
+    }
+
     pub fn frame_buffer(&self) -> &[u8] {
         &self.frame_buffer
     }
@@ -146,6 +195,9 @@ impl PPU {
     fn update_line(&mut self) -> u8 {
         let mut vblank = 0;
         self.line_progress += 1;
+        if self.ly < VBLANK_LINE && self.line_progress == 79 {
+            self.collect_oam();
+        }
         if self.ly < VBLANK_LINE && self.line_progress == HBLANK_CYCLE {
             self.draw_line();
         }
@@ -192,7 +244,7 @@ impl PPU {
         int_mask
     }
 
-    pub fn get_tile_color(&self, tile_index: u8, tile_row: u8, tile_col: u8) -> u8 {
+    fn get_bg_tile_color_index(&self, tile_index: u8, tile_row: u8, tile_col: u8) -> u8 {
         let offset = if self.lcdc & LCDC_BG_WINDOW_TILES == 0{
             ((TILE_AREA_0 as i16 + (tile_index as i8) as i16 * TILE_DATA_BYTES as i16)) as u16 - VRAM_BASE
         }else{
@@ -200,24 +252,108 @@ impl PPU {
         };
         let lo = self.vram[(offset + tile_row as u16 * 2) as usize];
         let hi = self.vram[(offset + tile_row as u16 * 2 + 1) as usize];
-        let color_idx = ((hi >> (7 - tile_col)) & 1) << 1 | ((lo >> (7 - tile_col)) & 1); 
-        ((self.bgp >> (color_idx * 2)) & 0x03) as u8
-    }  
+        ((hi >> (7 - tile_col)) & 1) << 1 | ((lo >> (7 - tile_col)) & 1)
+    }
 
-    pub fn draw_line(&mut self) {
-        // Background
-        let map_base = if self.lcdc & LCDC_BG_TILE_MAP == 0 { TILE_MAP_A } else { TILE_MAP_B } as u16;
-        let y = self.ly.wrapping_add(self.scy);
-        let tile_map_row = (y / 8) as u16;
-        let tile_row = y % 8;
-        for d in 0..SCREEN_W as u8 {
-            let x = d.wrapping_add(self.scx);
-            let tile_map_col = (x / 8) as u16;
-            let tile_col = x % 8;
-            let tile_index = self.vram[((map_base + tile_map_row * TILE_MAP_SIZE + tile_map_col) - VRAM_BASE) as usize];
-            let tile_color = self.get_tile_color(tile_index, tile_row, tile_col);
-            self.frame_buffer[(self.ly as u16 * SCREEN_W as u16 + d as u16) as usize] = tile_color;
+    fn apply_bg_palette(&self, color_index: u8) -> u8 {
+        (self.bgp >> (color_index * 2)) & 0x03
+    }
+
+    fn oam_item_overlaps_line(&self, item_idx: u8) -> bool {
+        let item_offset = (item_idx*4) as usize;
+        let item_size: i16 = if self.lcdc & LCDC_OBJ_SIZE == 0 {8} else {16};
+        let item_y: i16 = self.oam[item_offset] as i16;
+        let curr_line: i16 = self.ly as i16;
+        let item_top = item_y - 16;
+        let item_bottom = item_top + item_size;
+        curr_line >= item_top && curr_line < item_bottom
+    }
+
+
+    fn collect_oam(&mut self){
+        self.oam_line_items_count = 0;
+        for i in 0..40 as u8 {
+            if self.oam_item_overlaps_line(i) {
+                self.oam_line_items[self.oam_line_items_count as usize] = i;
+                self.oam_line_items_count += 1;
+            }
+            if self.oam_line_items_count == 10 {
+                break;
+            }
         }
+        self.oam_line_items[..self.oam_line_items_count as usize].sort_by_key(|&idx| self.oam[(idx as u16 * OAM_ITEM_BYTES + OAM_ITEM_X) as usize]);
+    }
+
+    fn draw_line(&mut self) {
+
+        let mut bg_color_index: [u8; SCREEN_W as usize] = [0; SCREEN_W as usize];
+        // Background draw
+        if self.lcdc & LCDC_BG_WINDOW_ENABLE != 0{
+            for d in 0..SCREEN_W as u8 {
+                // Obtain tilemap base, row of tiles and row in the tile (lol)
+                let map_base = if self.lcdc & LCDC_BG_TILE_MAP == 0 { TILE_MAP_A } else { TILE_MAP_B } as u16;
+                let y = self.ly.wrapping_add(self.scy);
+                let tile_map_row = (y / 8) as u16;
+                let tile_row = y % 8;
+
+                // Calc scroll, column of tiles and column in the tile (again lol)
+                let x = d.wrapping_add(self.scx);
+                let tile_map_col = (x / 8) as u16;
+                let tile_col = x % 8;
+                let tile_index = self.vram[((map_base + tile_map_row * TILE_MAP_SIZE + tile_map_col) - VRAM_BASE) as usize];
+                bg_color_index[d as usize] = self.get_bg_tile_color_index(tile_index, tile_row, tile_col);
+                self.frame_buffer[(self.ly as u16 * SCREEN_W as u16 + d as u16) as usize] = self.apply_bg_palette(bg_color_index[d as usize]);
+            }
+        }
+
+        // OAM draw
+        if self.lcdc & LCDC_OBJ_ENABLE != 0{
+            let mut painted_pixels: [bool; SCREEN_W as usize] = [false; SCREEN_W as usize];
+            for item in 0..self.oam_line_items_count {
+                // OAM item index 
+                let item_idx = self.oam_line_items[item as usize];
+
+                // Item mem address, X position (signed), Y Poistion, flags and size type
+                let item_addr = item_idx as u16 * OAM_ITEM_BYTES;
+                let item_x: i16 = self.oam[(item_addr + OAM_ITEM_X) as usize] as i16 - 8;
+                let item_y: u8 = self.oam[(item_addr + OAM_ITEM_Y) as usize];
+                let flags = self.oam[(item_addr + OAM_ITEM_FLAGS) as usize];
+                let size_16 = self.lcdc & LCDC_OBJ_SIZE != 0;
+
+                // Tile index (if mode 8x16 tile_index is forced to pair) 
+                let mut tile_idx = self.oam[(item_addr + OAM_ITEM_TILE_IDX) as usize];
+                if size_16 { tile_idx &= 0xFE };
+
+                let flip_v = flags & OAM_FLAG_V_FLIP != 0;
+                let flip_h = flags & OAM_FLAG_H_FLIP != 0;
+
+                // I'm tired of writing comments XD
+                let mut tile_row = (self.ly + 16 - item_y) as u16;
+                if flip_v { if size_16 {tile_row = 15 - tile_row;} else { tile_row = 7 - tile_row; } }
+                
+                let offset = tile_idx as u16 * 16 + tile_row * 2;
+                
+                let lo = self.vram[offset as usize];
+                let hi = self.vram[(offset + 1) as usize];
+
+                for tile_col in 0..8 {
+                    let x = item_x + tile_col;
+                    if x < 0 || x >= SCREEN_W as i16 { continue; }
+
+                    let bit = if flip_h { tile_col } else { 7 - tile_col };
+                    let color_index = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+                    if color_index == 0 { continue; }
+                    if painted_pixels[x as usize] { continue; };
+                    painted_pixels[x as usize] = true;
+
+                    if flags & OAM_FLAG_PRIORITY != 0 && bg_color_index[x as usize] != 0x00 { continue; }
+                    let palette = if flags & OAM_FLAG_PAL == 0 { self.obp0 } else { self.obp1 }; 
+                    self.frame_buffer[(self.ly as u16 * SCREEN_W as u16 + x as u16) as usize] = (palette >> color_index * 2) & 0x3;
+                }
+                
+            }
+        }
+
     }
 
     pub fn tick(&mut self, t: u8) -> u8 {
@@ -396,7 +532,8 @@ mod tests {
         std::array::from_fn(|row| {
             (0..8)
                 .map(|col| {
-                    let shade = ppu.get_tile_color(tile_index, row as u8, col as u8);
+                    let index = ppu.get_bg_tile_color_index(tile_index, row as u8, col as u8);
+                    let shade = ppu.apply_bg_palette(index);
                     PALETTE_CHARS[shade as usize]
                 })
                 .collect()
@@ -640,6 +777,215 @@ mod tests {
         assert_eq!(read_line0_first8(&ppu), "........");
     }
 
-    
+        // ---------- Sprites (OAM) ----------
+
+    const SPRITE_LCDC: u8 =
+        LCDC_LCDPPU_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE | LCDC_OBJ_ENABLE;
+
+    // Writes the 4 OAM bytes of sprite `n`: Y+16, X+8, tile, flags
+    fn put_sprite(ppu: &mut PPU, n: u16, y: u8, x: u8, tile: u8, flags: u8) {
+        ppu.write_oam(n * 4, y);
+        ppu.write_oam(n * 4 + 1, x);
+        ppu.write_oam(n * 4 + 2, tile);
+        ppu.write_oam(n * 4 + 3, flags);
+    }
+
+    // Reads pixels [from, to) of line `ly` as characters
+    fn read_pixels(ppu: &PPU, ly: usize, from: usize, to: usize) -> String {
+        const PALETTE_CHARS: [char; 4] = [' ', '.', 'º', '#'];
+        let fb = ppu.frame_buffer();
+        (from..to).map(|x| PALETTE_CHARS[fb[ly * 160 + x] as usize]).collect()
+    }
+
+    #[test]
+    fn test_draw_line_sprite_position_and_edges() {
+        let mut ppu = PPU::new();
+        ppu.set_lcdc(SPRITE_LCDC);
+        ppu.set_obp0(0xE4);
+
+        // Tile 1: solid color 3. BG uses tile 0 (empty) -> color 0
+        for i in 0..16 { ppu.write_vram(0x0010 + i, 0xFF); }
+
+        // X=8 -> screen pixels 0..8
+        put_sprite(&mut ppu, 0, 16, 8, 1, 0);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 16), "########        ");
+
+        // X=4 -> half outside on the left, pixels 0..4 visible
+        put_sprite(&mut ppu, 0, 16, 4, 1, 0);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 16), "####            ");
+
+        // X=165 -> half outside on the right, pixels 157..160 visible (no panic)
+        put_sprite(&mut ppu, 0, 16, 165, 1, 0);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 150, 160), "       ###");
+
+        // X=0 -> fully hidden
+        put_sprite(&mut ppu, 0, 16, 0, 1, 0);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 16), "                ");
+    }
+
+    #[test]
+    fn test_draw_line_sprite_transparency_and_bg_priority() {
+        let mut ppu = PPU::new();
+        ppu.set_lcdc(SPRITE_LCDC);
+        ppu.set_bgp(0xE4);
+        ppu.set_obp0(0xE4);
+
+        // Tile 0 (BG): solid color 1 '.'
+        for row in 0..8 {
+            ppu.write_vram(row * 2, 0xFF);
+            ppu.write_vram(row * 2 + 1, 0x00);
+        }
+        // Tile 1 (sprite): left half color 3, right half color 0 (transparent)
+        for i in 0..16 { ppu.write_vram(0x0010 + i, 0xF0); }
+
+        // Transparent pixels show the BG
+        put_sprite(&mut ppu, 0, 16, 8, 1, 0);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "####....");
+
+        // Bit 7 + BG color != 0 -> BG covers the sprite
+        put_sprite(&mut ppu, 0, 16, 8, 1, 0x80);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "........");
+
+        // Bit 7 + BG color 0 -> sprite is visible
+        for i in 0..16 { ppu.write_vram(i, 0x00); }
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "####    ");
+    }
+
+    #[test]
+    fn test_draw_line_sprite_flips() {
+        let mut ppu = PPU::new();
+        ppu.set_lcdc(SPRITE_LCDC);
+        ppu.set_obp0(0xE4);
+
+        // Tile 1: only row 0, column 0 painted (color 3)
+        ppu.write_vram(0x0010, 0x80);
+        ppu.write_vram(0x0011, 0x80);
+
+        // No flip
+        put_sprite(&mut ppu, 0, 16, 8, 1, 0);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "#       ");
+
+        // Flip H -> pixel moves to the right
+        put_sprite(&mut ppu, 0, 16, 8, 1, 0x20);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "       #");
+
+        // Flip V -> line 0 shows row 7 (empty)...
+        put_sprite(&mut ppu, 0, 16, 8, 1, 0x40);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "        ");
+
+        // ...and line 7 shows row 0
+        ppu.ly = 7;
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 7, 0, 8), "#       ");
+    }
+
+    #[test]
+    fn test_draw_line_sprite_palettes() {
+        let mut ppu = PPU::new();
+        ppu.set_lcdc(SPRITE_LCDC);
+        ppu.set_obp0(0xE4); // color 3 -> '#'
+        ppu.set_obp1(0x54); // color 3 -> '.'
+
+        for i in 0..16 { ppu.write_vram(0x0010 + i, 0xFF); }
+
+        put_sprite(&mut ppu, 0, 16, 8, 1, 0);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "########");
+
+        put_sprite(&mut ppu, 0, 16, 8, 1, 0x10);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "........");
+    }
+
+    #[test]
+    fn test_draw_line_sprite_overlap_priority() {
+        let mut ppu = PPU::new();
+        ppu.set_lcdc(SPRITE_LCDC);
+        ppu.set_obp0(0xE4);
+
+        // Tile 1: solid color 3 '#'. Tile 2: solid color 1 '.'
+        for i in 0..16 { ppu.write_vram(0x0010 + i, 0xFF); }
+        for row in 0..8 {
+            ppu.write_vram(0x0020 + row * 2, 0xFF);
+            ppu.write_vram(0x0020 + row * 2 + 1, 0x00);
+        }
+
+        // Different X: lower X wins even with a higher OAM index
+        put_sprite(&mut ppu, 0, 16, 16, 1, 0); // pixels 8..16
+        put_sprite(&mut ppu, 1, 16, 12, 2, 0); // pixels 4..12
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 16), "    ........####");
+
+        // Same X: lower OAM index wins
+        put_sprite(&mut ppu, 0, 16, 8, 1, 0);
+        put_sprite(&mut ppu, 1, 16, 8, 2, 0);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "########");
+    }
+
+    #[test]
+    fn test_draw_line_sprite_limit_10_per_line() {
+        let mut ppu = PPU::new();
+        ppu.set_lcdc(SPRITE_LCDC);
+        ppu.set_obp0(0xE4);
+
+        for i in 0..16 { ppu.write_vram(0x0010 + i, 0xFF); }
+
+        // 11 sprites side by side on line 0: only the first 10 are drawn
+        for n in 0..11 {
+            put_sprite(&mut ppu, n, 16, 8 + n as u8 * 8, 1, 0);
+        }
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 80), "#".repeat(80));
+        assert_eq!(read_pixels(&ppu, 0, 80, 88), "        ");
+    }
+
+    #[test]
+    fn test_draw_line_sprite_8x16() {
+        let mut ppu = PPU::new();
+        ppu.set_lcdc(SPRITE_LCDC | LCDC_OBJ_SIZE);
+        ppu.set_obp0(0xE4);
+
+        // Tile 2 (top half) empty, tile 3 (bottom half) solid color 3
+        for i in 0..16 { ppu.write_vram(0x0030 + i, 0xFF); }
+
+        // Index 3 is forced to 2 (& 0xFE): line 0 -> tile 2, row 0 (empty)
+        put_sprite(&mut ppu, 0, 16, 8, 3, 0);
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "        ");
+
+        // Line 8 -> row 8 = tile 3, row 0
+        ppu.ly = 8;
+        ppu.collect_oam();
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 8, 0, 8), "########");
+    }
 
 }

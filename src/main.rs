@@ -33,10 +33,10 @@ impl EmulatorApp {
                egui::ColorImage::new([160, 144], vec![egui::Color32::BLACK; 160*144]), 
              egui::TextureOptions::NEAREST),
 
-            palette: [egui::Color32::from_rgb(0x9B, 0xBC, 0x0F), // 0: más claro
-                      egui::Color32::from_rgb(0x8B, 0xAC, 0x0F), // 1
-                      egui::Color32::from_rgb(0x30, 0x62, 0x30), // 2
-                      egui::Color32::from_rgb(0x0F, 0x38, 0x0F), // 3: más oscuro
+            palette: [egui::Color32::from_rgb(0x9B, 0xBC, 0x0F),
+                      egui::Color32::from_rgb(0x8B, 0xAC, 0x0F),
+                      egui::Color32::from_rgb(0x30, 0x62, 0x30),
+                      egui::Color32::from_rgb(0x0F, 0x38, 0x0F),
                      ],
         };
 

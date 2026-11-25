@@ -27,12 +27,12 @@ const IE_ADDR:    u16 = 0xFFFF;
 pub struct Bus {
     rom:  Option<Cartridge>,
     wram: [u8; 0x2000],
-    oam:  [u8; 0x00A0],
     io:   [u8; 0x0080],
     hram: [u8; 0x007F],
     ie:    u8,
     timer: Timer,
     ppu: PPU,
+    dma: u8,
     serial: VecDeque<u8>
 }
 
@@ -42,12 +42,12 @@ impl Bus{
         Bus{
             rom:  None,
             wram: [0; 0x2000],
-            oam:  [0; 0x00A0],
             io:   [0; 0x0080],
             hram: [0; 0x007F],
             ie:    0,
             timer: Timer::new(),
             ppu: PPU::new(),
+            dma: 0,
             serial: VecDeque::new()
         }
     }
@@ -94,6 +94,13 @@ impl Bus{
         self.write(0xFF0F, self.read(0xFF0F) & !(1 << i));
     } 
 
+    fn dma_copy(&mut self) {
+        let addr = (self.dma as u16) << 8;
+        for i in 0..0xA0 {
+            self.write(OAM_BEGIN + i, self.read(addr + i));
+        }
+    }
+
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
             ..=ROM_END   => match &self.rom{
@@ -107,7 +114,7 @@ impl Bus{
             },
             WRAM_BEGIN..=WRAM_END => self.wram[(addr - WRAM_BEGIN) as usize],
             ECHO_BEGIN..=ECHO_END => self.wram[(addr - ECHO_BEGIN) as usize],
-            OAM_BEGIN..=OAM_END   => self.oam [(addr - OAM_BEGIN)  as usize],
+            OAM_BEGIN..=OAM_END   => self.ppu.read_oam(addr - OAM_BEGIN),
             NU_BEGIN..=NU_END     => 0xFF,
             IO_BEGIN..=IO_END     => {
 
@@ -139,7 +146,13 @@ impl Bus{
 
                     0xFF45 => self.ppu.lyc(),
 
+                    0xFF46 => self.dma,
+
                     0xFF47 => self.ppu.bgp(),
+
+                    0xFF48 => self.ppu.obp0(),
+
+                    0xFF49 => self.ppu.obp1(),
 
                     _=> self.io  [(addr - IO_BEGIN)   as usize]
                 }
@@ -158,7 +171,7 @@ impl Bus{
             },
             WRAM_BEGIN..=WRAM_END => self.wram[(addr - WRAM_BEGIN) as usize] = value,
             ECHO_BEGIN..=ECHO_END => self.wram[(addr - ECHO_BEGIN) as usize] = value,
-            OAM_BEGIN..=OAM_END   => self.oam [(addr - OAM_BEGIN)  as usize] = value,
+            OAM_BEGIN..=OAM_END   => self.ppu.write_oam(addr - OAM_BEGIN, value),
             IO_BEGIN..=IO_END     => {
                 
                 match addr {
@@ -185,7 +198,16 @@ impl Bus{
 
                     0xFF45 => self.ppu.set_lyc(value),
 
+                    0xFF46 => {
+                        self.dma = value;
+                        self.dma_copy();
+                    },
+
                     0xFF47 => self.ppu.set_bgp(value),
+
+                    0xFF48 =>  self.ppu.set_obp0(value),
+
+                    0xFF49 =>  self.ppu.set_obp1(value),
 
                     _ => self.io [(addr - IO_BEGIN) as usize] = value,
                 }
@@ -333,6 +355,18 @@ use super::*;
         assert_eq!(bus.read16(WRAM_END), 0xAABB);
         assert_eq!(bus.read(WRAM_END), 0xBB);
         assert_eq!(bus.read(WRAM_BEGIN), 0xAA);
+    }
+
+    #[test]
+    fn test_dma_copies_160_bytes_to_oam() {
+        let mut bus = Bus::new();
+        for i in 0..0xA0u16 {
+            bus.write(0xC000 + i, i as u8);
+        }
+        bus.write(0xFF46, 0xC0); // source = 0xC000
+        for i in 0..0xA0u16 {
+            assert_eq!(bus.read(0xFE00 + i), i as u8);
+        }
     }
  
 }
