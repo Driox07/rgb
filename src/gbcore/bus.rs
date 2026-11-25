@@ -68,9 +68,14 @@ impl Bus{
         }
     }
 
-    pub fn tick_ppu(&mut self, t: u8) {
+    pub fn tick_ppu(&mut self, t: u8) -> bool{
         let int_mask = self.ppu.tick(t);
         self.write(0xFF0F, self.read(0xFF0F) | int_mask);
+        int_mask & 1 == 1
+    }
+
+    pub fn ppu_framebuffer(&mut self) -> &[u8] {
+        self.ppu.frame_buffer()
     }
 
     pub fn fetch_serial(&mut self) -> Option<u8> {
