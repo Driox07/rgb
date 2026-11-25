@@ -1,6 +1,9 @@
 use eframe::egui;
+use rgb::gbcore;
 use rgb::gbcore::CPU;
 use rgb::gbcore::Bus;
+
+const FRAME_SECS: f64 = 70224.0 / 4194304.0;
 
 fn main() {
 
@@ -21,7 +24,9 @@ fn main() {
 struct EmulatorApp {
     cpu: CPU,
     texture: egui::TextureHandle,
-    palette: [egui::Color32; 4]
+    palette: [egui::Color32; 4],
+    last_frame: std::time::Instant,
+    elapsed: f64
 }
 
 impl EmulatorApp {
@@ -38,6 +43,8 @@ impl EmulatorApp {
                       egui::Color32::from_rgb(0x30, 0x62, 0x30),
                       egui::Color32::from_rgb(0x0F, 0x38, 0x0F),
                      ],
+            last_frame: std::time::Instant::now(),
+            elapsed: 0.0
         };
 
         let rom = match std::fs::read( rom_path ){
@@ -80,7 +87,48 @@ impl EmulatorApp {
 
 impl eframe::App for EmulatorApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        
+        egui::CentralPanel::default().show(ui, |ui| {
+            let up = ui.input(|i| i.key_down(egui::Key::ArrowUp));
+            let select = ui.input(|i| i.key_down(egui::Key::ShiftRight));
+            let down = ui.input(|i| i.key_down(egui::Key::ArrowDown));
+            let start = ui.input(|i| i.key_down(egui::Key::Enter));
+            let left = ui.input(|i| i.key_down(egui::Key::ArrowLeft));
+            let b = ui.input(|i| i.key_down(egui::Key::Z));
+            let right = ui.input(|i| i.key_down(egui::Key::ArrowRight));
+            let a = ui.input(|i| i.key_down(egui::Key::X));
+
+            self.cpu.bus.set_joypad_key(gbcore::joypad::KEY_UP, up);
+            self.cpu.bus.set_joypad_key(gbcore::joypad::KEY_SELECT, select);
+            self.cpu.bus.set_joypad_key(gbcore::joypad::KEY_DOWN, down);
+            self.cpu.bus.set_joypad_key(gbcore::joypad::KEY_START, start);
+            self.cpu.bus.set_joypad_key(gbcore::joypad::KEY_LEFT, left);
+            self.cpu.bus.set_joypad_key(gbcore::joypad::KEY_B, b);
+            self.cpu.bus.set_joypad_key(gbcore::joypad::KEY_RIGHT, right);
+            self.cpu.bus.set_joypad_key(gbcore::joypad::KEY_A, a);
+
+            let now = std::time::Instant::now();
+            self.elapsed += (now - self.last_frame).as_secs_f64();
+            self.last_frame = now;
+            self.elapsed = self.elapsed.min(FRAME_SECS * 3.0);
+
+            // Draw code
+            while self.elapsed >= FRAME_SECS{
+                self.run_frame();
+                self.elapsed -= FRAME_SECS;
+            }
+
+            let pixels: Vec<egui::Color32> = self.cpu.bus.ppu_framebuffer()
+                                            .iter()
+                                            .map(|&tono| self.palette[tono as usize])
+                                            .collect();
+            let image = egui::ColorImage::new([160, 144], pixels);
+            self.texture.set(image, egui::TextureOptions::NEAREST);   // 3. subir
+            egui::CentralPanel::default().show(ui, |ui| {           // 4. dibujar
+                    ui.add(egui::Image::from_texture(&self.texture)
+                    .fit_to_exact_size(egui::vec2(640.0, 576.0)));
+            });
+            ui.ctx().request_repaint();
+        });
     }
 
 }

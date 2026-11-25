@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 
-use super::Cartridge;
-use super::Timer;
-use super::PPU;
+use crate::gbcore::Cartridge;
+use crate::gbcore::Joypad;
+use crate::gbcore::PPU;
+use crate::gbcore::Timer;
 
 
 const ROM_END:    u16 = 0x7FFF;
@@ -31,6 +32,7 @@ pub struct Bus {
     hram: [u8; 0x007F],
     ie:    u8,
     timer: Timer,
+    joypad: Joypad,
     ppu: PPU,
     dma: u8,
     serial: VecDeque<u8>
@@ -46,6 +48,7 @@ impl Bus{
             hram: [0; 0x007F],
             ie:    0,
             timer: Timer::new(),
+            joypad: Joypad::new(),
             ppu: PPU::new(),
             dma: 0,
             serial: VecDeque::new()
@@ -101,6 +104,10 @@ impl Bus{
         }
     }
 
+    pub fn set_joypad_key(&mut self, key: u8, value: bool) {
+        self.joypad.set_key(key, value);
+    }
+
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
             ..=ROM_END   => match &self.rom{
@@ -120,6 +127,8 @@ impl Bus{
 
                 match addr {
                     
+                    0xFF00 => self.joypad.input(),
+
                     0xFF04 => self.timer.div(),
 
                     0xFF05 => self.timer.tima(),
@@ -175,6 +184,8 @@ impl Bus{
             IO_BEGIN..=IO_END     => {
                 
                 match addr {
+                    0xFF00 => self.joypad.set_input(value),
+
                     0xFF02 => {
                         if value == 0x81 { self.serial.push_back(self.io[1]); }
                         self.io [(addr - IO_BEGIN) as usize] = value
@@ -312,8 +323,6 @@ use super::*;
     #[test]
     fn write_read_io(){
         let mut bus = Bus::new();
-        bus.write(IO_BEGIN, 0x84);
-        assert_eq!(bus.read(IO_BEGIN), 0x84);
         bus.write(IO_BEGIN + 20, 0x29);
         assert_eq!(bus.read(IO_BEGIN + 20), 0x29);
         bus.write(IO_END, 0x24);
