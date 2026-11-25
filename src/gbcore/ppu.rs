@@ -58,6 +58,9 @@ pub struct PPU {
     scy: u8,
     scx: u8,
     bgp: u8,
+    wy: u8,
+    wx: u8,
+    window_line: u8,
 
     obp0: u8,
     obp1: u8,
@@ -82,6 +85,10 @@ impl PPU {
             scy: 0,
             scx: 0,
             bgp: 0,
+
+            wy: 0,
+            wx: 0,
+            window_line: 0,
 
             obp0: 0,
             obp1: 0,
@@ -151,6 +158,22 @@ impl PPU {
         self.bgp = value;
     }
 
+    pub fn wy(&self) -> u8 {
+        self.wy
+    }
+
+    pub fn set_wy(&mut self, value: u8) {
+        self.wy = value;
+    }
+
+    pub fn wx(&self) -> u8 {
+        self.wx
+    }
+
+    pub fn set_wx(&mut self, value: u8) {
+        self.wx = value;
+    }
+
     pub fn lyc(&self) -> u8 {
         self.lyc
     }
@@ -206,6 +229,7 @@ impl PPU {
             self.ly += 1;
             if self.ly == TOTAL_LINES {
                 self.ly = 0;
+                self.window_line = 0;
             }
             if self.ly == VBLANK_LINE{
                 vblank = 1;
@@ -285,25 +309,31 @@ impl PPU {
     }
 
     fn draw_line(&mut self) {
-
         let mut bg_color_index: [u8; SCREEN_W as usize] = [0; SCREEN_W as usize];
+        let mut increment_window_line = false;
         // Background draw
         if self.lcdc & LCDC_BG_WINDOW_ENABLE != 0{
             for d in 0..SCREEN_W as u8 {
+                // Check if in pixel (dot ) is in window aera
+                let window = self.lcdc & LCDC_WINDOW_ENABLE != 0 && self.ly >= self.wy && d + 7 >= self.wx;
+                if window { increment_window_line = true };
+                
                 // Obtain tilemap base, row of tiles and row in the tile (lol)
-                let map_base = if self.lcdc & LCDC_BG_TILE_MAP == 0 { TILE_MAP_A } else { TILE_MAP_B } as u16;
-                let y = self.ly.wrapping_add(self.scy);
+                let map_bit = if window { self.lcdc & LCDC_WINDOW_TILE_MAP } else { self.lcdc & LCDC_BG_TILE_MAP };
+                let map_base = if map_bit == 0 { TILE_MAP_A } else { TILE_MAP_B } as u16;
+                let y = if window { self.window_line } else {self.ly.wrapping_add(self.scy)};
                 let tile_map_row = (y / 8) as u16;
                 let tile_row = y % 8;
 
                 // Calc scroll, column of tiles and column in the tile (again lol)
-                let x = d.wrapping_add(self.scx);
+                let x = if window { d + 7 - self.wx } else {d.wrapping_add(self.scx)};
                 let tile_map_col = (x / 8) as u16;
                 let tile_col = x % 8;
                 let tile_index = self.vram[((map_base + tile_map_row * TILE_MAP_SIZE + tile_map_col) - VRAM_BASE) as usize];
                 bg_color_index[d as usize] = self.get_bg_tile_color_index(tile_index, tile_row, tile_col);
                 self.frame_buffer[(self.ly as u16 * SCREEN_W as u16 + d as u16) as usize] = self.apply_bg_palette(bg_color_index[d as usize]);
             }
+            if increment_window_line { self.window_line = self.window_line.wrapping_add(1); }
         }
 
         // OAM draw
@@ -986,6 +1016,119 @@ mod tests {
         ppu.collect_oam();
         ppu.draw_line();
         assert_eq!(read_pixels(&ppu, 8, 0, 8), "########");
+    }
+
+        // ---------- Window ----------
+
+    const WINDOW_LCDC: u8 = LCDC_LCDPPU_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE
+        | LCDC_WINDOW_ENABLE | LCDC_WINDOW_TILE_MAP; // window uses map B (0x9C00)
+
+    // Tile 1: solid color 3 '#', tile 2: solid color 1 '.'. BG (map A) all tile 2, window (map B) all tile 1
+    fn setup_window(ppu: &mut PPU) {
+        ppu.set_bgp(0xE4);
+        for i in 0..16 { ppu.write_vram(0x0010 + i, 0xFF); }
+        for row in 0..8 {
+            ppu.write_vram(0x0020 + row * 2, 0xFF);
+            ppu.write_vram(0x0020 + row * 2 + 1, 0x00);
+        }
+        for i in 0..0x400 {
+            ppu.write_vram(0x1800 + i, 2);
+            ppu.write_vram(0x1C00 + i, 1);
+        }
+    }
+
+    #[test]
+    fn test_draw_line_window_position() {
+        let mut ppu = PPU::new();
+        setup_window(&mut ppu);
+        ppu.set_lcdc(WINDOW_LCDC);
+
+        // WX=87 -> window starts at pixel 80
+        ppu.set_wy(0);
+        ppu.set_wx(87);
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 76, 84), "....####");
+
+        // WX=7 -> whole line is window
+        ppu.set_wx(7);
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 160), "#".repeat(160));
+
+        // WX > 166 -> window hidden
+        ppu.set_wx(167);
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 160), ".".repeat(160));
+    }
+
+    #[test]
+    fn test_draw_line_window_wy_and_enable() {
+        let mut ppu = PPU::new();
+        setup_window(&mut ppu);
+        ppu.set_lcdc(WINDOW_LCDC);
+        ppu.set_wx(7);
+        ppu.set_wy(5);
+
+        // Line above WY -> BG
+        ppu.ly = 4;
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 4, 0, 8), "........");
+
+        // Line WY -> window
+        ppu.ly = 5;
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 5, 0, 8), "########");
+
+        // LCDC bit 5 off -> BG
+        ppu.set_lcdc(WINDOW_LCDC & !LCDC_WINDOW_ENABLE);
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 5, 0, 8), "........");
+    }
+
+    #[test]
+    fn test_draw_line_window_ignores_scroll() {
+        let mut ppu = PPU::new();
+        setup_window(&mut ppu);
+        ppu.set_lcdc(WINDOW_LCDC);
+        ppu.set_wy(0);
+        ppu.set_wx(7);
+
+        // Window map: only the first tile of row 0 is tile 1, the rest is tile 2
+        for i in 1..0x400 { ppu.write_vram(0x1C00 + i, 2); }
+
+        ppu.set_scx(13);
+        ppu.set_scy(21);
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 16), "########........");
+    }
+
+    #[test]
+    fn test_draw_line_window_line_counter() {
+        let mut ppu = PPU::new();
+        setup_window(&mut ppu);
+        ppu.set_wy(0);
+        ppu.set_wx(7);
+
+        // Tile 1 now: row 1 color 1 '.', row 2 color 3 '#', other rows color 0
+        for i in 0..16 { ppu.write_vram(0x0010 + i, 0x00); }
+        ppu.write_vram(0x0012, 0xFF);
+        ppu.write_vram(0x0014, 0xFF);
+        ppu.write_vram(0x0015, 0xFF);
+
+        // Line 0: window drawn -> counter goes to 1
+        ppu.set_lcdc(WINDOW_LCDC);
+        ppu.ly = 0;
+        ppu.draw_line();
+
+        // Line 1: window disabled -> counter stays at 1
+        ppu.set_lcdc(WINDOW_LCDC & !LCDC_WINDOW_ENABLE);
+        ppu.ly = 1;
+        ppu.draw_line();
+
+        // Line 2: window enabled again -> continues at row 1 (not ly - wy = 2)
+        ppu.set_lcdc(WINDOW_LCDC & !0 );
+        ppu.ly = 2;
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 2, 0, 8), "........");
     }
 
 }

@@ -162,6 +162,10 @@ impl Bus{
                     0xFF48 => self.ppu.obp0(),
 
                     0xFF49 => self.ppu.obp1(),
+                    
+                    0xFF4A =>  self.ppu.wy(),
+                    
+                    0xFF4B =>  self.ppu.wx(),
 
                     _=> self.io  [(addr - IO_BEGIN)   as usize]
                 }
@@ -219,6 +223,10 @@ impl Bus{
                     0xFF48 =>  self.ppu.set_obp0(value),
 
                     0xFF49 =>  self.ppu.set_obp1(value),
+
+                    0xFF4A =>  self.ppu.set_wy(value),
+                    
+                    0xFF4B =>  self.ppu.set_wx(value),
 
                     _ => self.io [(addr - IO_BEGIN) as usize] = value,
                 }
