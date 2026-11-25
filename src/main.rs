@@ -86,7 +86,7 @@ impl EmulatorApp {
 }
 
 impl eframe::App for EmulatorApp {
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ui, |ui| {
             let up = ui.input(|i| i.key_down(egui::Key::ArrowUp));
             let select = ui.input(|i| i.key_down(egui::Key::ShiftRight));

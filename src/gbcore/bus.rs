@@ -177,6 +177,12 @@ impl Bus{
 
     pub fn write(&mut self, addr: u16, value: u8) {
         match addr {
+            ..=ROM_END => {
+                match self.rom.as_mut() {
+                    Some(cartridge) => cartridge.write(addr, value),
+                    _ => ()
+                }
+            },
             VRAM_BEGIN..=VRAM_END => self.ppu.write_vram(addr - VRAM_BEGIN, value),
             ERAM_BEGIN..=ERAM_END => match &mut self.rom{
                 Some(c) => c.write(addr, value),
