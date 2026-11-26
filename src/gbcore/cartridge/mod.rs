@@ -1,5 +1,13 @@
-const BANK0_END: u16 = 0x3FFF;
-const BANK1_BEGIN: u16 = 0x4000;
+mod no_mbc;
+mod mbc1;
+mod mbc5;
+
+use no_mbc::NoMBC;
+use mbc1::MBC1;
+use mbc5::MBC5;
+
+const _BANK0_END: u16 = 0x3FFF;
+const _BANK1_BEGIN: u16 = 0x4000;
 const BANK1_END: u16 = 0x7FFF;
 const ERAM_BEGIN: u16 = 0xA000;
 const ERAM_END:   u16 = 0xBFFF;
@@ -13,21 +21,19 @@ const RAM_TYPE_ADDR: u16 = 0x0149;
 const CHECKSUM_END:  u16 = 0x014C;
 const CHECKSUM_ADDR: u16 = 0x014D;
 
-const ERAM_NONE: u8 = 0;
-const ERAM_8KB: u8 = 2;
-const ERAM_32KB: u8 = 3;
+const ERAM_NONE: u8 = 0x00;
+const ERAM_8KB: u8 = 0x02;
+const ERAM_32KB: u8 = 0x03;
+const ERAM_64KB: u8 = 0x05;
+const ERAM_128KB: u8 = 0x04;
 
 #[derive(Debug)]
 pub struct Cartridge{
     pub title: String,
     rom: Vec<u8>,
     ram: Option<Vec<u8>>,
-    ram_enabled: bool,
     ram_written: bool,
-    selected_bank: u8,
-    bank2: u8,
-    mode: u8,
-    mbc: u8,
+    mbc: Box<dyn MBC>,
     has_battery: bool
 }
 
@@ -51,13 +57,20 @@ impl Cartridge{
             return Err("Invalid checksum".to_string());
         }
 
-        let mbc = rom.get(TYPE_ADDR as usize).copied().unwrap();
-        if mbc > 3 {
-            println!("This ROM needs MBC {:#04X} but it's not implemented yet. Expect bad things XD", mbc);
-        }
+        let ctr_type = rom.get(TYPE_ADDR as usize).copied().unwrap();
+        let mbc: Box<dyn MBC> = match ctr_type {
+            0x00 => Box::new(NoMBC),
+            0x01..=0x03 => Box::new(MBC1::new()),
+            0x19..=0x1E => Box::new(MBC5::new()),
+            _ => {
+                println!("This ROM is type {:#04X} but it's not implemented yet. Expect bad things XD", ctr_type);
+                Box::new(NoMBC)
+            } 
+        };
 
-        let has_battery = match mbc {
-           3 => true,
+        let has_battery = match ctr_type {
+           0x03 => true,
+           0x1E | 0x1B => true,
            _ => false
         };
 
@@ -65,6 +78,8 @@ impl Cartridge{
             ERAM_NONE => None,
             ERAM_8KB => Some(vec![0; 0x2000]),
             ERAM_32KB => Some(vec![0; 0x8000]),
+            ERAM_64KB => Some(vec![0; 0x10000]),
+            ERAM_128KB => Some(vec![0; 0x20000]),
             weirdo => {
                 print!("Extra RAM type {:#04X} not recognized. Expect bad things XD", weirdo);
                 None
@@ -78,11 +93,7 @@ impl Cartridge{
             title: text.trim_end_matches("\0").to_string(), 
             rom,
             ram,
-            ram_enabled: false,
             ram_written: false,
-            selected_bank: 1,
-            bank2: 0,
-            mode: 0,
             mbc,
             has_battery
         })
@@ -122,20 +133,19 @@ impl Cartridge{
 
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
-            ..=BANK0_END => self.rom.get(addr as usize).copied().unwrap_or(0xFF),
-            BANK1_BEGIN..=BANK1_END => {
-                let bank = (self.bank2 << 5) | self.selected_bank;
-                let raddr = bank as usize * 0x4000 + (addr as usize - 0x4000);
+            ..=BANK1_END => {
+                let raddr = self.mbc.rom_offset(addr);
                 self.rom[raddr % self.rom.len()]
             },
             ERAM_BEGIN..=ERAM_END => {
-                match &self.ram {
+                let raddr = self.mbc.ram_offset(addr);
+                match raddr {
                     None => 0xFF,
-                    Some(ram) => {
-                        if !self.ram_enabled { return 0xFF }
-                        let bank = if self.mode == 1 { self.bank2 } else {  0 };
-                        let raddr = bank as usize * 0x2000 + (addr - ERAM_BEGIN) as usize;
-                        ram[raddr % ram.len()]
+                    Some(a) => {
+                        match &self.ram {
+                            None => 0xFF,
+                            Some(ram) => ram[a % ram.len()]
+                        }
                     }
                 }
             },
@@ -144,25 +154,21 @@ impl Cartridge{
     }
 
     pub fn write(&mut self, addr: u16, value: u8) {
-        if self.mbc == 0x00 { return }
         match addr {
-            ..=0x1FFF => self.ram_enabled = (value & 0xF) == 0xA,
-            0x2000..=0x3FFF => {
-                self.selected_bank = value & 0x1F;
-                if self.selected_bank == 0 { self.selected_bank += 1; } 
-            },
-            0x4000..=0x5FFF => self.bank2 = value & 0x3,
-            0x6000..=0x7FFF => self.mode = value & 1,
+            ..=0x7FFF => self.mbc.write_register(addr, value),
             ERAM_BEGIN..=ERAM_END => {
-                match self.ram.as_mut() {
-                    None => (),
-                    Some(ram) => {
-                        if !self.ram_enabled { return } 
-                        self.ram_written = true;
-                        let bank = if self.mode == 1 { self.bank2 } else {  0 };
-                        let raddr = bank as usize * 0x2000 + (addr - ERAM_BEGIN) as usize;
-                        let ram_len = ram.len(); 
-                        ram[raddr % ram_len] = value;
+                let raddr = self.mbc.ram_offset(addr);
+                match raddr {
+                    None => return,
+                    Some(a) => {
+                        match &mut self.ram {
+                            None => return,
+                            Some(ram) => { 
+                                let ram_len = ram.len();
+                                ram[a % ram_len] = value;
+                                self.ram_written = true;
+                            }
+                        }
                     }
                 }
             }
@@ -170,6 +176,16 @@ impl Cartridge{
         }
     }
 
+}
+
+pub trait MBC: std::fmt::Debug {
+    fn mbc_info(&self) -> String;
+
+    fn rom_offset(&self, addr: u16) -> usize;
+
+    fn ram_offset(&self, addr: u16) -> Option<usize>;
+
+    fn write_register(&mut self, addr: u16, value: u8); 
 }
 
 #[cfg(test)]
@@ -297,6 +313,69 @@ use super::*;
         assert_eq!(cart.read(0xA000), 0x42);
 
         // Disable again
+        cart.write(0x0000, 0x00);
+        assert_eq!(cart.read(0xA000), 0xFF);
+    }
+
+        // ---------- MBC5 ----------
+
+    #[test]
+    fn mbc5_rom_bank_switching() {
+        let mut cart = make_rom(0x19, 0x00, 8);
+
+        assert_eq!(cart.read(0x4000), 1);
+
+        cart.write(0x2000, 5);
+        assert_eq!(cart.read(0x4000), 5);
+
+        // Unlike MBC1, bank 0 can be selected
+        cart.write(0x2000, 0);
+        assert_eq!(cart.read(0x4000), 0);
+    }
+
+    #[test]
+    fn mbc5_rom_bank_bit8() {
+        let mut cart = make_rom(0x19, 0x00, 512); // 8 MB
+        // Mark bank 0x101 so it can be told apart from bank 0x01
+        cart.rom[0x101 * 0x4000 + 1] = 0xAB;
+
+        cart.write(0x2000, 0x01);
+        assert_eq!(cart.read(0x4001), 0x00); // bank 0x001
+
+        cart.write(0x3000, 0x01);
+        assert_eq!(cart.read(0x4001), 0xAB); // bank 0x101
+
+        // Changing the low byte keeps bit 8
+        cart.write(0x2000, 0x02);
+        assert_eq!(cart.read(0x4000), 0x02); // bank 0x102 (tag is the low byte)
+        cart.write(0x3000, 0x00);
+        cart.write(0x2000, 0x01);
+        assert_eq!(cart.read(0x4001), 0x00); // back to bank 0x001
+    }
+
+    #[test]
+    fn mbc5_ram_banks() {
+        let mut cart = make_rom(0x1B, 0x04, 4); // MBC5 + RAM + battery, 128 KB of RAM
+
+        cart.write(0x0000, 0x0A);
+
+        // Bank 0
+        cart.write(0xA000, 0x11);
+        // Bank 15
+        cart.write(0x4000, 0x0F);
+        cart.write(0xA000, 0xFF);
+        assert_eq!(cart.read(0xA000), 0xFF);
+
+        // Back to bank 0
+        cart.write(0x4000, 0x00);
+        assert_eq!(cart.read(0xA000), 0x11);
+
+        // RAM layout must match the real chip (so .sav files are compatible)
+        let ram = cart.get_ram().unwrap();
+        assert_eq!(ram[0], 0x11);
+        assert_eq!(ram[15 * 0x2000], 0xFF);
+
+        // Disable
         cart.write(0x0000, 0x00);
         assert_eq!(cart.read(0xA000), 0xFF);
     }
