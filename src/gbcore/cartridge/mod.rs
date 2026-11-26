@@ -1,9 +1,11 @@
 mod no_mbc;
 mod mbc1;
+mod mbc2;
 mod mbc5;
 
 use no_mbc::NoMBC;
 use mbc1::MBC1;
+use mbc2::MBC2;
 use mbc5::MBC5;
 
 const _BANK0_END: u16 = 0x3FFF;
@@ -61,6 +63,7 @@ impl Cartridge{
         let mbc: Box<dyn MBC> = match ctr_type {
             0x00 => Box::new(NoMBC),
             0x01..=0x03 => Box::new(MBC1::new()),
+            0x05..=0x06 => Box::new(MBC2::new()),
             0x19..=0x1E => Box::new(MBC5::new()),
             _ => {
                 println!("This ROM is type {:#04X} but it's not implemented yet. Expect bad things XD", ctr_type);
@@ -70,19 +73,28 @@ impl Cartridge{
 
         let has_battery = match ctr_type {
            0x03 => true,
+           0x06 => true,
            0x1E | 0x1B => true,
            _ => false
         };
 
-        let ram = match rom.get(RAM_TYPE_ADDR as usize).copied().unwrap() {
-            ERAM_NONE => None,
-            ERAM_8KB => Some(vec![0; 0x2000]),
-            ERAM_32KB => Some(vec![0; 0x8000]),
-            ERAM_64KB => Some(vec![0; 0x10000]),
-            ERAM_128KB => Some(vec![0; 0x20000]),
-            weirdo => {
-                print!("Extra RAM type {:#04X} not recognized. Expect bad things XD", weirdo);
-                None
+        let ram = match ctr_type {
+            0x05 | 0x06 => {
+                Some(vec![0; 0x200])
+            },
+
+            _ => {
+                match rom.get(RAM_TYPE_ADDR as usize).copied().unwrap() {
+                    ERAM_NONE => None,
+                    ERAM_8KB => Some(vec![0; 0x2000]),
+                    ERAM_32KB => Some(vec![0; 0x8000]),
+                    ERAM_64KB => Some(vec![0; 0x10000]),
+                    ERAM_128KB => Some(vec![0; 0x20000]),
+                    weirdo => {
+                        print!("Extra RAM type {:#04X} not recognized. Expect bad things XD", weirdo);
+                        None
+                    }
+                }
             }
         };
         
@@ -144,7 +156,7 @@ impl Cartridge{
                     Some(a) => {
                         match &self.ram {
                             None => 0xFF,
-                            Some(ram) => ram[a % ram.len()]
+                            Some(ram) => self.mbc.ram_read(ram[a % ram.len()])
                         }
                     }
                 }
@@ -184,6 +196,8 @@ pub trait MBC: std::fmt::Debug {
     fn rom_offset(&self, addr: u16) -> usize;
 
     fn ram_offset(&self, addr: u16) -> Option<usize>;
+
+    fn ram_read(&self, value: u8) -> u8 { value }
 
     fn write_register(&mut self, addr: u16, value: u8); 
 }
@@ -378,6 +392,59 @@ use super::*;
         // Disable
         cart.write(0x0000, 0x00);
         assert_eq!(cart.read(0xA000), 0xFF);
+    }
+
+        // ---------- MBC2 ----------
+
+    #[test]
+    fn mbc2_rom_bank_switching() {
+        let mut cart = make_rom(0x05, 0x00, 16); // 256 KB
+
+        assert_eq!(cart.read(0x4000), 1);
+
+        // Address bit 8 = 1 -> ROM bank register
+        cart.write(0x2100, 5);
+        assert_eq!(cart.read(0x4000), 5);
+
+        // Only 4 bits are used
+        cart.write(0x0100, 0x1F);
+        assert_eq!(cart.read(0x4000), 0x0F);
+
+        // Bank 0 -> 1
+        cart.write(0x2100, 0);
+        assert_eq!(cart.read(0x4000), 1);
+
+        // Address bit 8 = 0 -> does NOT change the ROM bank
+        cart.write(0x2000, 5);
+        assert_eq!(cart.read(0x4000), 1);
+    }
+
+    #[test]
+    fn mbc2_ram() {
+        let mut cart = make_rom(0x06, 0x00, 2); // MBC2 + battery, header says no RAM
+
+        // Disabled: 0xFF
+        assert_eq!(cart.read(0xA000), 0xFF);
+
+        // Enable (address bit 8 = 0)
+        cart.write(0x0000, 0x0A);
+
+        // Only the low 4 bits are stored, the high 4 read as 1
+        cart.write(0xA000, 0x35);
+        assert_eq!(cart.read(0xA000), 0xF5);
+
+        // 512 positions, mirrored over 0xA000-0xBFFF
+        cart.write(0xA1FF, 0x07);
+        assert_eq!(cart.read(0xA1FF), 0xF7);
+        assert_eq!(cart.read(0xA200), 0xF5); // mirror of 0xA000
+        assert_eq!(cart.read(0xBFFF), 0xF7); // mirror of 0xA1FF
+
+        // Disable again
+        cart.write(0x0000, 0x00);
+        assert_eq!(cart.read(0xA000), 0xFF);
+
+        // Battery
+        assert!(cart.has_battery());
     }
 
 }
