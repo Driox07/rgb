@@ -5,7 +5,7 @@ pub const PPU_MODE_VBLANK: u8 = 1;
 pub const PPU_MODE_OAM: u8 = 2;
 pub const PPU_MODE_DRAWING: u8 = 3;
 
-pub const LCDC_LCDPPU_ENABLE: u8 = 0x80;
+pub const LCDC_LCD_ENABLE: u8 = 0x80;
 pub const LCDC_WINDOW_TILE_MAP: u8 = 0x40;
 pub const LCDC_WINDOW_ENABLE: u8 = 0x20;
 pub const LCDC_BG_WINDOW_TILES: u8 = 0x10;
@@ -81,7 +81,7 @@ impl PPU {
             lyc: 0,
             last_stat_state: false,
 
-            lcdc: 0,
+            lcdc: 0x91,
             scy: 0,
             scx: 0,
             bgp: 0,
@@ -131,6 +131,15 @@ impl PPU {
     }
 
     pub fn set_lcdc(&mut self, value: u8) {
+        let last_lcd_enable_state = self.lcdc & LCDC_LCD_ENABLE;
+        let new_lcd_enable_state = value & LCDC_LCD_ENABLE;
+        if last_lcd_enable_state != 0 && new_lcd_enable_state == 0 {
+            self.ly = 0;
+            self.line_progress = 0;
+            self.window_line = 0;
+            self.frame_buffer.fill(0);
+            self.stat &= !0x03;
+        }
         self.lcdc = value;
     }
 
@@ -334,6 +343,9 @@ impl PPU {
                 self.frame_buffer[(self.ly as u16 * SCREEN_W as u16 + d as u16) as usize] = self.apply_bg_palette(bg_color_index[d as usize]);
             }
             if increment_window_line { self.window_line = self.window_line.wrapping_add(1); }
+        }else{
+            let initial_d = self.ly as usize * SCREEN_W as usize;
+            self.frame_buffer[initial_d..initial_d + SCREEN_W as usize].fill(0);
         }
 
         // OAM draw
@@ -387,6 +399,7 @@ impl PPU {
     }
 
     pub fn tick(&mut self, t: u8) -> u8 {
+        if self.lcdc & LCDC_LCD_ENABLE == 0 { return 0; }
         let mut int_mask: u8 = 0;
         for _ in 0..t {
             int_mask |= self.update_line();
@@ -574,7 +587,7 @@ mod tests {
     fn test_tile_decode_and_ascii_render() {
         let mut ppu = PPU::new();
         // Enable LCD, unsigned tile addressing (0x8000), and identity BGP (0b11_10_01_00 = 0xE4)
-        ppu.set_lcdc(LCDC_LCDPPU_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE);
+        ppu.set_lcdc(LCDC_LCD_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE);
         ppu.set_bgp(0xE4);
 
         // 8x8 tile covering all 4 color IDs (0=' ', 1='.', 2='º', 3='#')
@@ -611,7 +624,7 @@ mod tests {
     fn test_tile_signed_addressing_mode_0x8800_boundaries() {
         let mut ppu = PPU::new();
         // LCDC bit 4 = 0 -> Base 0x9000 with signed i8 index
-        ppu.set_lcdc(LCDC_LCDPPU_ENABLE | LCDC_BG_WINDOW_ENABLE);
+        ppu.set_lcdc(LCDC_LCD_ENABLE | LCDC_BG_WINDOW_ENABLE);
         ppu.set_bgp(0xE4);
 
         // Tile index 0x00 (0) -> 0x9000 (VRAM offset 0x1000) -> color ID 1 ('.')
@@ -639,7 +652,7 @@ mod tests {
     #[test]
     fn test_tile_bgp_palette_remapping() {
         let mut ppu = PPU::new();
-        ppu.set_lcdc(LCDC_LCDPPU_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE);
+        ppu.set_lcdc(LCDC_LCD_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE);
 
         // Row 0 of tile 0 has pixels with color IDs: [0, 1, 2, 3, 0, 1, 2, 3]
         // lo = 0b0101_0101 (0x55), hi = 0b0011_0011 (0x33)
@@ -659,7 +672,7 @@ mod tests {
     fn test_draw_line_bg_map_framebuffer() {
         let mut ppu = PPU::new();
         // LCD ON, Unsigned Tile Data (0x8000), BG Map A (0x9800), BG Enable
-        ppu.set_lcdc(LCDC_LCDPPU_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE);
+        ppu.set_lcdc(LCDC_LCD_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE);
         ppu.set_bgp(0xE4);
 
         // Tile 1: decorative frame pattern
@@ -709,7 +722,7 @@ mod tests {
     fn test_draw_line_bg_map_columns_and_scroll() {
         let mut ppu = PPU::new();
         // LCD ON, Unsigned Tile Data (0x8000), BG Map A (0x9800), BG Enable
-        ppu.set_lcdc(LCDC_LCDPPU_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE);
+        ppu.set_lcdc(LCDC_LCD_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE);
         ppu.set_bgp(0xE4);
 
         // Tile 1: solid '#' (color ID 3)
@@ -792,13 +805,13 @@ mod tests {
         };
 
         // LCDC bit 3 = 0 -> selects Map A (0x9800)
-        ppu.set_lcdc(LCDC_LCDPPU_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE);
+        ppu.set_lcdc(LCDC_LCD_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE);
         ppu.draw_line();
         assert_eq!(read_line0_first8(&ppu), "########");
 
         // LCDC bit 3 = 1 -> selects Map B (0x9C00)
         ppu.set_lcdc(
-            LCDC_LCDPPU_ENABLE
+            LCDC_LCD_ENABLE
                 | LCDC_BG_WINDOW_TILES
                 | LCDC_BG_TILE_MAP
                 | LCDC_BG_WINDOW_ENABLE,
@@ -810,7 +823,7 @@ mod tests {
         // ---------- Sprites (OAM) ----------
 
     const SPRITE_LCDC: u8 =
-        LCDC_LCDPPU_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE | LCDC_OBJ_ENABLE;
+        LCDC_LCD_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE | LCDC_OBJ_ENABLE;
 
     // Writes the 4 OAM bytes of sprite `n`: Y+16, X+8, tile, flags
     fn put_sprite(ppu: &mut PPU, n: u16, y: u8, x: u8, tile: u8, flags: u8) {
@@ -1020,7 +1033,7 @@ mod tests {
 
         // ---------- Window ----------
 
-    const WINDOW_LCDC: u8 = LCDC_LCDPPU_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE
+    const WINDOW_LCDC: u8 = LCDC_LCD_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE
         | LCDC_WINDOW_ENABLE | LCDC_WINDOW_TILE_MAP; // window uses map B (0x9C00)
 
     // Tile 1: solid color 3 '#', tile 2: solid color 1 '.'. BG (map A) all tile 2, window (map B) all tile 1
@@ -1129,6 +1142,60 @@ mod tests {
         ppu.ly = 2;
         ppu.draw_line();
         assert_eq!(read_pixels(&ppu, 2, 0, 8), "........");
+    }
+
+        // ---------- LCD off / BG disabled ----------
+
+    #[test]
+    fn test_lcd_off_stops_ppu() {
+        let mut ppu = PPU::new(); // LCD on (0x91)
+
+        // Advance to line 10
+        for _ in 0..(456 * 10 / 4) { ppu.tick(4); }
+        assert_eq!(ppu.ly(), 10);
+
+        // Turn LCD off -> LY = 0, mode 0
+        ppu.set_lcdc(0x11);
+        assert_eq!(ppu.ly(), 0);
+        assert_eq!(ppu.stat() & 0x03, PPU_MODE_HBLANK);
+
+        // A whole frame passes: nothing moves, no interrupts
+        let mut int_mask = 0;
+        for _ in 0..(456 * 154 / 4) { int_mask |= ppu.tick(4); }
+        assert_eq!(ppu.ly(), 0);
+        assert_eq!(int_mask, 0);
+    }
+
+    #[test]
+    fn test_lcd_on_restarts_from_line_0() {
+        let mut ppu = PPU::new();
+        for _ in 0..(456 * 10 / 4) { ppu.tick(4); }
+
+        ppu.set_lcdc(0x11); // off
+        ppu.set_lcdc(0x91); // on again
+
+        // Starts at line 0, dot 0: one line later LY = 1
+        assert_eq!(ppu.ly(), 0);
+        for _ in 0..(456 / 4) { ppu.tick(4); }
+        assert_eq!(ppu.ly(), 1);
+    }
+
+    #[test]
+    fn test_draw_line_bg_disabled_clears_line() {
+        let mut ppu = PPU::new();
+        ppu.set_bgp(0xE4);
+        for i in 0..16 { ppu.write_vram(0x0010 + i, 0xFF); } // tile 1 solid color 3
+        ppu.write_vram(0x1800, 1);
+
+        // BG on -> first tile painted
+        ppu.set_lcdc(LCDC_LCD_ENABLE | LCDC_BG_WINDOW_TILES | LCDC_BG_WINDOW_ENABLE);
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "########");
+
+        // BG off -> the old pixels must be cleared
+        ppu.set_lcdc(LCDC_LCD_ENABLE | LCDC_BG_WINDOW_TILES);
+        ppu.draw_line();
+        assert_eq!(read_pixels(&ppu, 0, 0, 8), "        ");
     }
 
 }
