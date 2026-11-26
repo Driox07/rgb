@@ -23,10 +23,12 @@ pub struct Cartridge{
     rom: Vec<u8>,
     ram: Option<Vec<u8>>,
     ram_enabled: bool,
+    ram_written: bool,
     selected_bank: u8,
     bank2: u8,
     mode: u8,
-    mbc: u8
+    mbc: u8,
+    has_battery: bool
 }
 
 impl Cartridge{
@@ -49,6 +51,16 @@ impl Cartridge{
             return Err("Invalid checksum".to_string());
         }
 
+        let mbc = rom.get(TYPE_ADDR as usize).copied().unwrap();
+        if mbc > 3 {
+            println!("This ROM needs MBC {:#04X} but it's not implemented yet. Expect bad things XD", mbc);
+        }
+
+        let has_battery = match mbc {
+           3 => true,
+           _ => false
+        };
+
         let ram = match rom.get(RAM_TYPE_ADDR as usize).copied().unwrap() {
             ERAM_NONE => None,
             ERAM_8KB => Some(vec![0; 0x2000]),
@@ -58,11 +70,6 @@ impl Cartridge{
                 None
             }
         };
-
-        let mbc = rom.get(TYPE_ADDR as usize).copied().unwrap();
-        if mbc > 3 {
-            println!("This ROM needs MBC {:#04X} but it's not implemented yet. Expect bad things XD", mbc);
-        }
         
         let bytes: &[u8] = &rom[TITLE_BEGIN as usize ..= TITLE_END as usize];
         let text = String::from_utf8_lossy(bytes);
@@ -72,11 +79,45 @@ impl Cartridge{
             rom,
             ram,
             ram_enabled: false,
+            ram_written: false,
             selected_bank: 1,
             bank2: 0,
             mode: 0,
-            mbc
+            mbc,
+            has_battery
         })
+    }
+
+    pub fn has_battery(&self) -> bool {
+        self.has_battery
+    }
+
+    pub fn get_ram(&self) -> Option<&[u8]> {
+        match &self.ram {
+            None => None,
+            Some(ram) => Some(ram.as_slice())
+        }
+    }
+
+    pub fn ram_written(&mut self) -> bool {
+        let rw = self.ram_written && self.has_battery;
+        self.ram_written = false;
+        rw
+    }
+
+    pub fn load_ram(&mut self, lram: &[u8]) -> Result<(), String>{
+        if !self.has_battery { return Err("This game has no battery.".to_string()); }
+        match &mut self.ram {
+            None => Err("SAV data is corrupted or not compatible with this game".to_string()),
+            Some(ram) => {
+                if lram.len() == ram.len() {
+                    ram.copy_from_slice(lram);
+                    Ok(())
+                }else{
+                    Err("SAV data is corrupted or not compatible with this game".to_string())
+                }
+            }
+        }
     }
 
     pub fn read(&self, addr: u16) -> u8 {
@@ -117,6 +158,7 @@ impl Cartridge{
                     None => (),
                     Some(ram) => {
                         if !self.ram_enabled { return } 
+                        self.ram_written = true;
                         let bank = if self.mode == 1 { self.bank2 } else {  0 };
                         let raddr = bank as usize * 0x2000 + (addr - ERAM_BEGIN) as usize;
                         let ram_len = ram.len(); 

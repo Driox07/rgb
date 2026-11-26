@@ -26,7 +26,7 @@ const HRAM_END:   u16 = 0xFFFE;
 const IE_ADDR:    u16 = 0xFFFF;
 
 pub struct Bus {
-    rom:  Option<Cartridge>,
+    cartridge:  Option<Cartridge>,
     wram: [u8; 0x2000],
     io:   [u8; 0x0080],
     hram: [u8; 0x007F],
@@ -42,7 +42,7 @@ impl Bus{
 
     pub fn new() -> Bus {
         Bus{
-            rom:  None,
+            cartridge:  None,
             wram: [0; 0x2000],
             io:   [0; 0x0080],
             hram: [0; 0x007F],
@@ -55,21 +55,66 @@ impl Bus{
         }
     }
 
+    /* =========================
+        CARTRIDGE
+       ========================= */
+
     pub fn load_rom(&mut self, rom: Vec<u8>) -> Result<(), String> {
         match Cartridge::new(rom) {
             Ok(cartridge) => {
-                self.rom = Some(cartridge);
+                self.cartridge = Some(cartridge);
                 Ok(())
             },
             Err(error) => Err(format!("Couldn't load rom: {}", error))
         }
     }
 
+    pub fn cartridge_ram_written(&mut self) -> bool {
+        match &mut self.cartridge {
+            None => false,
+            Some(rom) => rom.ram_written()
+        }
+    }
+
+    pub fn cartridge_ram(&mut self) -> Result<&[u8], String> {
+        match &mut self.cartridge {
+            None => Err("No ROM loaded".to_string()),
+            Some(rom) => {
+                match rom.get_ram() {
+                    None => Err("No cartridge RAM or not enabled".to_string()),
+                    Some(ram) => Ok(ram)
+                }
+            }
+        }
+    }
+
+    pub fn catridge_set_ram(&mut self, ram: &[u8]) -> Result<(), String> {
+        match &mut self.cartridge {
+            None => Err("No ROM loaded".to_string()),
+            Some(rom) => rom.load_ram(ram)
+        }
+    }
+
+    pub fn cartridge_has_battery(&self) -> bool {
+        match &self.cartridge {
+            None => false,
+            Some(rom) => rom.has_battery()
+        }
+    }
+
+    /* =========================
+        TIMER
+       ========================= */
+
     pub fn tick_timer(&mut self, t: u8) {
         if self.timer.tick(t) {
             self.request_interrupt(super::timer::TIMER_IF_BIT);
         }
     }
+
+    /* =========================
+        PPU
+       ========================= */
 
     pub fn tick_ppu(&mut self, t: u8) -> bool{
         let int_mask = self.ppu.tick(t);
@@ -80,6 +125,10 @@ impl Bus{
     pub fn ppu_framebuffer(&mut self) -> &[u8] {
         self.ppu.frame_buffer()
     }
+
+    /* =========================
+        BUS
+       ========================= */
 
     pub fn fetch_serial(&mut self) -> Option<u8> {
         self.serial.pop_front()
@@ -110,12 +159,12 @@ impl Bus{
 
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
-            ..=ROM_END   => match &self.rom{
+            ..=ROM_END   => match &self.cartridge{
                 Some(c) => c.read(addr),
                 None => 0xFF
             },
             VRAM_BEGIN..=VRAM_END => self.ppu.read_vram(addr - VRAM_BEGIN),
-            ERAM_BEGIN..=ERAM_END => match &self.rom{
+            ERAM_BEGIN..=ERAM_END => match &self.cartridge{
                 Some(c) => c.read(addr),
                 None => 0xFF
             },
@@ -178,13 +227,13 @@ impl Bus{
     pub fn write(&mut self, addr: u16, value: u8) {
         match addr {
             ..=ROM_END => {
-                match self.rom.as_mut() {
+                match self.cartridge.as_mut() {
                     Some(cartridge) => cartridge.write(addr, value),
                     _ => ()
                 }
             },
             VRAM_BEGIN..=VRAM_END => self.ppu.write_vram(addr - VRAM_BEGIN, value),
-            ERAM_BEGIN..=ERAM_END => match &mut self.rom{
+            ERAM_BEGIN..=ERAM_END => match &mut self.cartridge{
                 Some(c) => c.write(addr, value),
                 None => ()
             },
