@@ -83,6 +83,8 @@ impl EmulatorApp {
 
             let serial = self.cpu.bus.fetch_serial();
 
+            self.cpu.bus.tick_cartridge(t);
+
             if serial != None {
                 print!("{}", serial.unwrap() as char);
                 let _ = std::io::Write::flush(&mut std::io::stdout());

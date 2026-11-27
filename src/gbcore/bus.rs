@@ -69,18 +69,25 @@ impl Bus{
         }
     }
 
-    pub fn cartridge_ram_written(&mut self) -> bool {
+    pub fn tick_cartridge(&mut self, t: u8) {
         match &mut self.cartridge {
-            None => false,
-            Some(rom) => rom.ram_written()
+            None => (),
+            Some(ctr) => ctr.tick_mbc(t)
         }
     }
 
-    pub fn cartridge_ram(&mut self) -> Result<&[u8], String> {
+    pub fn cartridge_ram_written(&mut self) -> bool {
+        match &mut self.cartridge {
+            None => false,
+            Some(ctr) => ctr.ram_written()
+        }
+    }
+
+    pub fn cartridge_ram(&mut self) -> Result<Vec<u8>, String> {
         match &mut self.cartridge {
             None => Err("No ROM loaded".to_string()),
-            Some(rom) => {
-                match rom.get_ram() {
+            Some(ctr) => {
+                match ctr.get_ram() {
                     None => Err("No cartridge RAM or not enabled".to_string()),
                     Some(ram) => Ok(ram)
                 }
@@ -91,14 +98,14 @@ impl Bus{
     pub fn catridge_set_ram(&mut self, ram: &[u8]) -> Result<(), String> {
         match &mut self.cartridge {
             None => Err("No ROM loaded".to_string()),
-            Some(rom) => rom.load_ram(ram)
+            Some(ctr) => ctr.load_ram(ram)
         }
     }
 
     pub fn cartridge_has_battery(&self) -> bool {
         match &self.cartridge {
             None => false,
-            Some(rom) => rom.has_battery()
+            Some(ctr) => ctr.has_battery()
         }
     }
 

@@ -1,11 +1,13 @@
 mod no_mbc;
 mod mbc1;
 mod mbc2;
+mod mbc3;
 mod mbc5;
 
 use no_mbc::NoMBC;
 use mbc1::MBC1;
 use mbc2::MBC2;
+use mbc3::MBC3;
 use mbc5::MBC5;
 
 const _BANK0_END: u16 = 0x3FFF;
@@ -64,6 +66,7 @@ impl Cartridge{
             0x00 => Box::new(NoMBC),
             0x01..=0x03 => Box::new(MBC1::new()),
             0x05..=0x06 => Box::new(MBC2::new()),
+            0x0F..=0x13 => Box::new(MBC3::new()),
             0x19..=0x1E => Box::new(MBC5::new()),
             _ => {
                 println!("This ROM is type {:#04X} but it's not implemented yet. Expect bad things XD", ctr_type);
@@ -74,6 +77,7 @@ impl Cartridge{
         let has_battery = match ctr_type {
            0x03 => true,
            0x06 => true,
+           0x0F | 0x10 | 0x13 => true,
            0x1E | 0x1B => true,
            _ => false
         };
@@ -115,10 +119,14 @@ impl Cartridge{
         self.has_battery
     }
 
-    pub fn get_ram(&self) -> Option<&[u8]> {
+    pub fn get_ram(&self) -> Option<Vec<u8>> {
         match &self.ram {
             None => None,
-            Some(ram) => Some(ram.as_slice())
+            Some(ram) => {
+                let mut extended = ram.clone();
+                extended.extend(self.mbc.rtc_save());
+                Some(extended)
+            }
         }
     }
 
@@ -133,14 +141,20 @@ impl Cartridge{
         match &mut self.ram {
             None => Err("SAV data is corrupted or not compatible with this game".to_string()),
             Some(ram) => {
-                if lram.len() == ram.len() {
-                    ram.copy_from_slice(lram);
+                let ram_len = ram.len();
+                if lram.len() >= ram_len {
+                    ram.copy_from_slice(&lram[0..ram_len]);
+                    self.mbc.rtc_load(&lram[ram_len..]);
                     Ok(())
                 }else{
                     Err("SAV data is corrupted or not compatible with this game".to_string())
                 }
             }
         }
+    }
+
+    pub fn tick_mbc(&mut self, t: u8) {
+        self.mbc.tick(t);
     }
 
     pub fn read(&self, addr: u16) -> u8 {
@@ -150,13 +164,18 @@ impl Cartridge{
                 self.rom[raddr % self.rom.len()]
             },
             ERAM_BEGIN..=ERAM_END => {
-                let raddr = self.mbc.ram_offset(addr);
-                match raddr {
-                    None => 0xFF,
-                    Some(a) => {
-                        match &self.ram {
+                match self.mbc.rtc_read(){
+                    Some(value) => value,
+                    None => {
+                        let raddr = self.mbc.ram_offset(addr);
+                        match raddr {
                             None => 0xFF,
-                            Some(ram) => self.mbc.ram_read(ram[a % ram.len()])
+                            Some(a) => {
+                                match &self.ram {
+                                    None => 0xFF,
+                                    Some(ram) => self.mbc.ram_read(ram[a % ram.len()])
+                                }
+                            }
                         }
                     }
                 }
@@ -169,16 +188,18 @@ impl Cartridge{
         match addr {
             ..=0x7FFF => self.mbc.write_register(addr, value),
             ERAM_BEGIN..=ERAM_END => {
-                let raddr = self.mbc.ram_offset(addr);
-                match raddr {
-                    None => return,
-                    Some(a) => {
-                        match &mut self.ram {
-                            None => return,
-                            Some(ram) => { 
-                                let ram_len = ram.len();
-                                ram[a % ram_len] = value;
-                                self.ram_written = true;
+                if !self.mbc.rtc_write(value){
+                    let raddr = self.mbc.ram_offset(addr);
+                    match raddr {
+                        None => return,
+                        Some(a) => {
+                            match &mut self.ram {
+                                None => return,
+                                Some(ram) => { 
+                                    let ram_len = ram.len();
+                                    ram[a % ram_len] = value;
+                                    self.ram_written = true;
+                                }
                             }
                         }
                     }
@@ -193,11 +214,21 @@ impl Cartridge{
 pub trait MBC: std::fmt::Debug {
     fn mbc_info(&self) -> String;
 
+    fn tick(&mut self, _t: u8) {}
+
     fn rom_offset(&self, addr: u16) -> usize;
 
     fn ram_offset(&self, addr: u16) -> Option<usize>;
 
     fn ram_read(&self, value: u8) -> u8 { value }
+
+    fn rtc_read(&self) -> Option<u8> { None }
+
+    fn rtc_write(&mut self, _value: u8) -> bool { false }
+
+    fn rtc_save(&self) -> Vec<u8> { Vec::new() }
+
+    fn rtc_load(&mut self, _data: &[u8]) {} 
 
     fn write_register(&mut self, addr: u16, value: u8); 
 }
@@ -445,6 +476,148 @@ use super::*;
 
         // Battery
         assert!(cart.has_battery());
+    }
+
+        // ---------- MBC3 RTC ----------
+
+    fn tick_seconds(cart: &mut Cartridge, secs: u32) {
+        for _ in 0..secs * (4_194_304 / 4) { cart.tick_mbc(4); }
+    }
+
+    // Latch, then read the 5 RTC registers [S, M, H, DL, DH]
+    fn read_rtc(cart: &mut Cartridge) -> [u8; 5] {
+        cart.write(0x6000, 0x00);
+        cart.write(0x6000, 0x01);
+        let mut regs = [0; 5];
+        for i in 0..5 {
+            cart.write(0x4000, 0x08 + i as u8);
+            regs[i] = cart.read(0xA000);
+        }
+        regs
+    }
+
+    fn write_rtc(cart: &mut Cartridge, regs: [u8; 5]) {
+        for i in 0..5 {
+            cart.write(0x4000, 0x08 + i as u8);
+            cart.write(0xA000, regs[i]);
+        }
+    }
+
+    #[test]
+    fn mbc3_rtc_counts_seconds() {
+        let mut cart = make_rom(0x10, 0x03, 4);
+        cart.write(0x0000, 0x0A);
+
+        tick_seconds(&mut cart, 2);
+        assert_eq!(read_rtc(&mut cart), [2, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mbc3_rtc_carries() {
+        let mut cart = make_rom(0x10, 0x03, 4);
+        cart.write(0x0000, 0x0A);
+
+        // Day 255, 23:59:59 -> day 256 (bit 8 goes to DH bit 0)
+        write_rtc(&mut cart, [59, 59, 23, 0xFF, 0x00]);
+        tick_seconds(&mut cart, 1);
+        assert_eq!(read_rtc(&mut cart), [0, 0, 0, 0x00, 0x01]);
+
+        // Day 511, 23:59:59 -> day 0 + overflow flag (bit 7)
+        write_rtc(&mut cart, [59, 59, 23, 0xFF, 0x01]);
+        tick_seconds(&mut cart, 1);
+        assert_eq!(read_rtc(&mut cart), [0, 0, 0, 0x00, 0x80]);
+    }
+
+    #[test]
+    fn mbc3_rtc_latch_is_a_snapshot() {
+        let mut cart = make_rom(0x10, 0x03, 4);
+        cart.write(0x0000, 0x0A);
+
+        assert_eq!(read_rtc(&mut cart)[0], 0); // latched at 0 s
+        tick_seconds(&mut cart, 1);
+
+        // Without a new latch, still the old snapshot
+        cart.write(0x4000, 0x08);
+        assert_eq!(cart.read(0xA000), 0);
+
+        // A second latch must work too
+        assert_eq!(read_rtc(&mut cart)[0], 1);
+    }
+
+    #[test]
+    fn mbc3_rtc_halt() {
+        let mut cart = make_rom(0x10, 0x03, 4);
+        cart.write(0x0000, 0x0A);
+
+        write_rtc(&mut cart, [10, 0, 0, 0, 0x40]); // halted
+        tick_seconds(&mut cart, 2);
+        assert_eq!(read_rtc(&mut cart), [10, 0, 0, 0, 0x40]);
+    }
+
+    #[test]
+    fn mbc3_rtc_and_ram_do_not_mix() {
+        let mut cart = make_rom(0x10, 0x03, 4);
+        cart.write(0x0000, 0x0A);
+
+        cart.write(0x4000, 0x00); // RAM bank 0
+        cart.write(0xA000, 0x42);
+
+        cart.write(0x4000, 0x08); // RTC seconds
+        cart.write(0xA000, 0x05);
+
+        cart.write(0x4000, 0x00); // back to RAM
+        assert_eq!(cart.read(0xA000), 0x42);
+    }
+
+        #[test]
+    fn mbc3_rtc_save_roundtrip() {
+        let mut cart = make_rom(0x10, 0x03, 4);
+        cart.write(0x0000, 0x0A);
+        cart.write(0x4000, 0x00);
+        cart.write(0xA000, 0x42);
+        write_rtc(&mut cart, [10, 20, 5, 0x34, 0x40]); // halted: loading must not advance it
+
+        let sav = cart.get_ram().unwrap();
+        assert_eq!(sav.len(), 0x8000 + 48); // 32 KB RAM + 48 bytes RTC
+
+        let mut cart2 = make_rom(0x10, 0x03, 4);
+        cart2.load_ram(&sav).unwrap();
+        cart2.write(0x0000, 0x0A);
+        assert_eq!(read_rtc(&mut cart2), [10, 20, 5, 0x34, 0x40]);
+        cart2.write(0x4000, 0x00);
+        assert_eq!(cart2.read(0xA000), 0x42);
+    }
+
+    #[test]
+    fn mbc3_rtc_load_adds_elapsed_time() {
+        let mut cart = make_rom(0x10, 0x03, 4);
+
+        // RAM + clock at 00:00:00 day 0 (running) + latch, saved one hour ago
+        let mut sav = vec![0u8; 0x8000 + 40];
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        sav.extend_from_slice(&(now - 3600).to_le_bytes());
+
+        cart.load_ram(&sav).unwrap();
+        cart.write(0x0000, 0x0A);
+        let regs = read_rtc(&mut cart);
+        assert_eq!((regs[1], regs[2]), (0, 1)); // 0 minutes, 1 hour
+    }
+
+    #[test]
+    fn mbc3_loads_sav_of_any_known_size() {
+        let mut cart = make_rom(0x10, 0x03, 4);
+
+        // Old .sav, RAM only
+        assert!(cart.load_ram(&vec![0u8; 0x8000]).is_ok());
+
+        // 44-byte format (timestamp as u32), clock halted so it doesn't advance
+        let mut sav = vec![0u8; 0x8000 + 44];
+        sav[0x8000 + 16] = 0x40; // DH = halt
+        assert!(cart.load_ram(&sav).is_ok());
+
+        // Shorter than RAM -> error
+        assert!(cart.load_ram(&vec![0u8; 0x100]).is_err());
     }
 
 }
